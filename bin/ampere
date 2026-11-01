@@ -111,8 +111,20 @@ def data_env(amp):
 def desktop_env():
     env = dict(os.environ)
     env["PATH"] = launch_path()
-    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH"):
+    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH", "AMPERE_SESSION_PATH"):
         env.pop(key, None)
+    return env
+
+
+def session_env():
+    """The desktop environment with the session's own PATH, which the panel
+    passes by name: a background Amp task runs the project's tools (mise,
+    cargo, node) and needs the PATH a terminal would have. Only absolute
+    entries are kept."""
+    env = desktop_env()
+    parts = [p for p in os.environ.get("AMPERE_SESSION_PATH", "").split(":") if p.startswith("/")]
+    if parts:
+        env["PATH"] = ":".join(dict.fromkeys(parts))
     return env
 
 
@@ -537,14 +549,9 @@ def cmd_exec(args):
     prompt = clean(" ".join(rest[1:])).strip()[:MAX_PROMPT]
     if not prompt:
         raise Fail("an empty prompt")
-    argv = [amp, "-x", prompt] + extra + (["-ox"] if orb else [])
-    runner = shutil.which("systemd-run", path="/usr/bin")
-    if runner:
-        unit = "ampere-" + str(int(time.time() * 1000))
-        detach([runner, "--user", "--collect", "--quiet", "--unit=" + unit,
-                "--working-directory=" + cwd, "--"] + argv, cwd=cwd)
-    else:
-        detach(argv, cwd=cwd)
+    # In a session of its own, like every launch here: it outlives this
+    # helper's run and a shell restart, which stops Quickshell alone.
+    detach([amp, "-x", prompt] + extra + (["-ox"] if orb else []), cwd=cwd, env=session_env())
     emit({"ok": True, "dir": cwd, "orb": orb})
 
 

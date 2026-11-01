@@ -31,7 +31,7 @@ def save(state):
 def log(argv):
     os.makedirs(DIR, exist_ok=True)
     with open(LOG, "a") as f:
-        f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "at": time.time()}) + "\n")
+        f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "path": os.environ.get("PATH", ""), "pid": os.getpid(), "at": time.time()}) + "\n")
 
 
 def flag(args, name):
@@ -129,6 +129,17 @@ def main(args):
                                  "working": True, "connected": "-ox" not in args, "project": os.path.basename(os.getcwd()),
                                  "tree": "" if "-ox" in args else "file://" + os.getcwd(), "messageCount": 1})
         save(state)
+        # A task that takes a while (execSeconds in the state), then goes
+        # quiet the way a finished turn does.
+        seconds = int(state.get("execSeconds", 0))
+        if seconds > 0 and "-ox" not in args:
+            time.sleep(seconds)
+            state = load()
+            for t in state["threads"]:
+                if t["id"] == tid:
+                    t["working"] = False
+                    t["finishedAt"] = time.time()
+            save(state)
         return 0
     # Interactive: the TUI, threads continue, top, update, login and the rest.
     print("\033[1mfake amp\033[0m " + " ".join(args))

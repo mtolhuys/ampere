@@ -116,6 +116,21 @@ class Guards(unittest.TestCase):
         self.assertEqual(ampere.flags(["--mode", "rm -rf"])[0], [])
 
 
+class SessionPath(unittest.TestCase):
+    def test_keeps_absolute_entries_once(self):
+        old = os.environ.get("AMPERE_SESSION_PATH")
+        os.environ["AMPERE_SESSION_PATH"] = "/a/bin::relative:/usr/bin:/a/bin:."
+        try:
+            env = ampere.session_env()
+        finally:
+            if old is None:
+                del os.environ["AMPERE_SESSION_PATH"]
+            else:
+                os.environ["AMPERE_SESSION_PATH"] = old
+        self.assertEqual(env["PATH"], "/a/bin:/usr/bin")
+        self.assertNotIn("AMPERE_SESSION_PATH", env)
+
+
 class Cli(unittest.TestCase):
     def test_refusals_are_json(self):
         self.assertEqual(run("thread", "archive", "nope")[1]["ok"], False)

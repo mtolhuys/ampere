@@ -51,6 +51,9 @@ Panel {
       var value = Quickshell.env(pass[i])
       if (value) env[pass[i]] = String(value)
     }
+    // Background asks run the project's tools, so they get the session's PATH.
+    var sessionPath = Quickshell.env("PATH")
+    if (sessionPath) env.AMPERE_SESSION_PATH = String(sessionPath)
     var omarchy = Quickshell.env("OMARCHY_PATH")
     if (omarchy) env.AMPERE_OMARCHY_PATH = String(omarchy)
     var amp = String(setting("ampPath", "") || "")

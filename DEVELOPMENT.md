@@ -67,6 +67,8 @@ omakit inspect . --offline
 omakit submit . --category <c> --tags <a,b> --json --offline
 ```
 
-These read a commit. The baseline reports `review-required` for
-service management: `bin/ampere exec` starts background asks with
-`systemd-run --user` so they outlive the shell.
+These read a commit. Keep the baseline free of capabilities: a detected one
+sends every update, docs included, to the marketplace's manual queue. That is
+why background asks are plain detached processes (a shell restart stops
+Quickshell alone, which the lab's restart scenario proves) rather than
+service units.

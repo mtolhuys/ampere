@@ -145,7 +145,8 @@ With a bar on several screens, one instance polls and shares what it read.
   omakit's Store block). Copying writes to the clipboard with `wl-copy`.
 - **Processes:** terminals open through `uwsm-app` and `xdg-terminal-exec`
   with app id `org.omarchy.agent`, like `omarchy agent`. Background asks run
-  as a transient `systemd-run --user` unit so they outlive the shell.
+  in a session of their own with your session's `PATH`, so a shell restart
+  doesn't stop them (proved in the lab).
 - Ampere respects your Amp permission settings. It adds no
   `--dangerously-allow-all`.
 

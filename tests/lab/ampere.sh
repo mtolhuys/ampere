@@ -216,6 +216,31 @@ PY
     sleep 1
     shot notification
 
+    log "A background ask survives a shell restart, with the session's PATH"
+    ssh_guest "jq '.execSeconds = 45' \$HOME/.fake-amp/state.json > /tmp/s.json && mv /tmp/s.json \$HOME/.fake-amp/state.json"
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 1.5
+    qmp press n; sleep 0.5; qmp type "Survive a restart"; qmp press ctrl-ret
+    check background "Ctrl+Enter starts the long task" within 15 called '["-x","Survive a restart"]'
+    local task_pid task_path shell_path
+    task_pid=$(ssh_guest "jq -r 'select(.argv == [\"-x\",\"Survive a restart\"]) | .pid' \$HOME/.fake-amp/calls.log | tail -1")
+    task_path=$(ssh_guest "jq -r 'select(.argv == [\"-x\",\"Survive a restart\"]) | .path' \$HOME/.fake-amp/calls.log | tail -1")
+    # The shell's own PATH, read from whichever process answers as omarchy-shell.
+    shell_path=$(ssh_guest "for p in \$(pgrep -f 'quickshell|(^|/)qs( |\$)'); do tr '\\0' '\\n' < /proc/\$p/environ 2>/dev/null | sed -n 's/^PATH=//p'; done | head -1")
+    note "shell PATH: ${shell_path:-<not found>}"
+    # The helper keeps each entry once, as PATH lookup would anyway.
+    shell_path=$(tr ':' '\n' <<<"$shell_path" | awk 'NF && !seen[$0]++' | paste -sd:)
+    note "task pid $task_pid"
+    check background "the task runs with the shell session's PATH" test -n "$task_path" -a "$task_path" = "$shell_path"
+    ssh_session "omarchy-shell $AMPERE_ID close" >/dev/null
+    guest_job restart 90 "omarchy-restart-shell" || true
+    wait_for_guest_state "the shell is back after the restart" 60 ssh_session "omarchy-shell shell ping | grep -qx ok"
+    check background "the task is still running after the shell restart" ssh_guest "kill -0 $task_pid"
+    task_done() { ssh_guest "jq -e '.threads[] | select(.title == \"Survive a restart\") | select(.working == false and .finishedAt != null)' \$HOME/.fake-amp/state.json"; }
+    check background "and it finishes its turn afterwards" within 70 task_done
+    ssh_guest "jq '.execSeconds = 0' \$HOME/.fake-amp/state.json > /tmp/s.json && mv /tmp/s.json \$HOME/.fake-amp/state.json"
+    wait_for_guest_state "Ampere answers over IPC after the restart" 60 ssh_session "omarchy-shell $AMPERE_ID working | grep -q ."
+
     log "Terminal presets and continue"
     ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
     within 10 panel_open; sleep 2

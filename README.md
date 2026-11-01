@@ -74,7 +74,7 @@ signed in (`amp login`). It finds `amp` in `~/.local/bin`, `~/.amp/bin` or
 mise; set **Amp CLI path** in the widget's settings if yours is elsewhere.
 
 ```bash
-omarchy plugin add https://github.com/mtolhuys/omarchy-ampere.git
+omarchy plugin add https://github.com/mtolhuys/ampere.git
 ```
 
 The bolt lands in the bar's right section; drag it anywhere on the bar.

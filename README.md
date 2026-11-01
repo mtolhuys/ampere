@@ -33,10 +33,11 @@ one box that starts new work in a terminal, in the background or in an orb.
 - **Every recent thread.** Working threads first, then newest first: project,
   age and length. Thread actions appear under the cursor:
   continue in a terminal (in the directory the thread ran in), open on
-  ampcode.com, copy the link, copy the whole thread as Markdown, rename inline,
-  archive, and delete with a second press to confirm.
-- **Search every thread** with Amp's own query language (`auth after:7d`,
-  `repo:…`, `pr:true`).
+  ampcode.com, copy the link, copy the whole thread as Markdown, rename it (on
+  ampcode.com), archive, and delete with a second press to confirm.
+- **Search every thread** by title, project or directory, as you type. The
+  search runs inside the panel over the threads Amp lists, so your search
+  terms never leave it.
 - **Ask Amp.** Type what you want, pick a directory (from where your threads
   and runners work), a mode (Low, Medium, High, Ultra) and Fast, then:
   - **Enter** opens Amp in a terminal with your message as the first turn,
@@ -66,7 +67,7 @@ On a vertical bar, in Catppuccin Latte:
 | `c` | Continue it in a terminal |
 | `y` | Copy its link |
 | `m` | Copy it as Markdown |
-| `e` | Rename it |
+| `e` | Rename it on ampcode.com |
 | `a` | Archive it |
 | `q` | Mute or unmute its notifications |
 | `x` `x` | Delete it (press twice) |
@@ -164,7 +165,7 @@ Every program Ampere starts goes through omakit's Run block (an absolute
 path, argv only, a closed environment, a hard deadline, bounded output) and
 one helper, [`bin/ampere`](bin/ampere). The helper only calls `amp`, and only
 these: `top --stream-jsonl` (read for one snapshot, then ended),
-`threads list|search|archive|rename|share|delete|markdown|continue`, `usage`,
+`threads list|archive|share|delete|markdown|continue`, `usage`,
 `runner list`, `-x`, and the toolbox's terminal commands. The panel polls
 every 4 s while open, every 8 s while a thread works, and every 60 s otherwise.
 With a bar on several screens, one instance polls and shares what it read.
@@ -175,13 +176,21 @@ With a bar on several screens, one instance polls and shares what it read.
   notification mutes in `~/.local/state/io.github.mtolhuys.ampere/memory.json`
   (0600, through omakit's Store block). Copying writes to the clipboard with
   `wl-copy`.
-- **Your prompts stay private.** What you type into Ask Amp is never put on a
-  command line, where other accounts on the machine could read it in
-  `/proc`. The panel hands it to the helper in the environment, which only
-  your account can read. A background or orb ask pipes it into `amp -x` on
-  stdin. A terminal ask leaves it in a 0600 file under
-  `$XDG_RUNTIME_DIR/io.github.mtolhuys.ampere/`, which the terminal reads and
-  deletes before it starts Amp.
+- **Your conversations stay private.** No conversation text (what you type
+  into Ask Amp, a search term, a thread's title) is ever put on a command
+  line, where other accounts on the machine could read it in `/proc`:
+  - Ask Amp: the panel hands the prompt to the helper in the environment,
+    which only your account can read. A background or orb ask pipes it into
+    `amp -x` on stdin. A terminal ask leaves it in a 0600 file under
+    `$XDG_RUNTIME_DIR/io.github.mtolhuys.ampere/`, which the terminal reads
+    and deletes before it starts Amp.
+  - Search runs in the panel, over `amp threads list`; `amp threads search`
+    would need the term as an argument.
+  - Renaming happens on ampcode.com, since `amp threads rename` takes the
+    new name only as an argument.
+  - Notifications go to the helper in the environment and on to the
+    notification server over D-Bus from Ampere's own code, not
+    `notify-send`, whose arguments would hold the thread's title.
 - **Processes:** terminals open through `uwsm-app` and `xdg-terminal-exec`
   with app id `org.omarchy.agent`, like `omarchy agent`. Background asks run
   in a session of their own with your session's `PATH`, so a shell restart

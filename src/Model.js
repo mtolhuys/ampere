@@ -201,6 +201,23 @@ function notifiable(done, starts, now, minSeconds, muted) {
   })
 }
 
+// The panel's own thread search: every word must appear in the title, the
+// project or the directory, in any case. Working state comes from the live
+// rows; at most `limit` results, in the catalog's order (newest first).
+function search(catalog, live, query, limit) {
+  var words = String(query || "").toLowerCase().split(/\s+/).filter(function(w) { return w !== "" })
+  if (words.length === 0) return []
+  var byId = {}
+  for (var i = 0; i < (live || []).length; i++) byId[live[i].id] = live[i]
+  var out = []
+  for (var j = 0; j < (catalog || []).length && out.length < (limit || 40); j++) {
+    var row = catalog[j]
+    var hay = ((row.title || "") + " " + (row.project || "") + " " + (row.dir || "")).toLowerCase()
+    if (words.every(function(w) { return hay.indexOf(w) >= 0 })) out.push(byId[row.id] || row)
+  }
+  return out
+}
+
 // Directories the ask box offers: the remembered one first, then where recent
 // threads ran, then the runner's, then home. Unique, at most `limit`.
 function askDirs(remembered, threadDirs, runnerDirs, home, limit) {
@@ -253,6 +270,7 @@ if (typeof module !== "undefined") {
     tierShort: tierShort, baseName: baseName, prettyDir: prettyDir, state: state, subtitle: subtitle,
     working: working, finished: finished, askDirs: askDirs, wave: wave, clamp: clamp,
     voice: voice, subtitleRest: subtitleRest, turnStarts: turnStarts, quietHours: quietHours,
-    inQuietHours: inQuietHours, muteState: muteState, nextMute: nextMute, notifiable: notifiable
+    inQuietHours: inQuietHours, muteState: muteState, nextMute: nextMute, notifiable: notifiable,
+    search: search
   }
 }

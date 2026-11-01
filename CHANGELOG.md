@@ -7,10 +7,18 @@
 - A bell in the panel header (`b`) cycles on, snoozed for an hour, off.
 - Mute a single thread's notifications from its row (`q`).
 - IPC: notifications, snooze <minutes>, mute, unmute.
-- Ask Amp prompts never appear in a process's command line: the helper gets
-  them in its environment, background and orb asks pipe them into `amp -x` on
-  stdin, and a terminal ask reads them from a 0600 file in the runtime
-  directory that it deletes before it starts Amp.
+- No conversation text appears in a process's command line:
+  - Ask Amp prompts reach the helper in its environment; background and orb
+    asks pipe them into `amp -x` on stdin, and a terminal ask reads them
+    from a 0600 file in the runtime directory that it deletes before Amp
+    starts.
+  - Search runs in the panel over `amp threads list`, instead of passing the
+    term to `amp threads search`.
+  - Rename (`e`) opens the thread on ampcode.com; `amp threads rename` takes
+    the name only as an argument.
+  - Notifications reach the helper in its environment and the notification
+    server over D-Bus from the helper itself, instead of through
+    `notify-send`'s arguments.
 
 ## 0.1.0
 

@@ -41,6 +41,7 @@ omakit_lab_suite() {
   # goes over base64, so the check's own command line does not.
   argv_has() { ssh_guest "python3 /tmp/argv_has.py $(printf %s "$1" | base64 -w0)"; }
   not_in_argv() { ! argv_has "$1"; }
+  not_called() { ! called "$1"; }
   clipboard_is() { [[ $(ssh_session "wl-paste -n" 2>/dev/null) == "$1" ]]; }
   panel_open() { ssh_session "hyprctl -j layers | jq -e '[.. | objects | select(.namespace? == \"omarchy-keyboard-panel\")] | length > 0'"; }
   panel_closed() { ! panel_open; }
@@ -48,6 +49,8 @@ omakit_lab_suite() {
   bell_is_after() { [[ $(ipc "$1") == "$2" ]]; }
   shot() { capture_console "$1"; note "screenshot $1.png"; }
   # Close the terminals Ampere opened, by their app id, without a dispatcher.
+  # Close the browser a thread link opened.
+  close_browser() { ssh_session "pkill -f 'ampcode\\.com/threads'" >/dev/null 2>&1 || true; }
   close_terminals() { ssh_session "hyprctl -j clients | jq -r '.[] | select(.class | test(\"^org\\\\.omarchy\\\\.(agent|ampere)\")) | .pid' | xargs -r kill" >/dev/null 2>&1 || true; }
 
   # The shell's log and Ampere's lines in it, on success and on every early return.
@@ -156,8 +159,10 @@ PY
     qmp press esc; sleep 0.4
     qmp press j; sleep 0.6
     shot panel-cursor
-    qmp press slash; sleep 0.4; qmp type atlas
-    check search "typing searches Amp's threads" within 10 called '["threads","search","--json","-n","30","atlas"]'
+    qmp press slash; sleep 0.4; qmp type billing
+    check search "typing searches the threads Amp lists" within 10 called '["threads","list","--json","--limit","500"]'
+    check private "the search term never reaches Amp" not_called billing
+    check private "and is in no process's command line" not_in_argv billing
     sleep 1.5
     shot search
     qmp press esc; sleep 0.3; qmp press esc; sleep 0.3; qmp press esc
@@ -199,11 +204,12 @@ PY
     qmp press j; sleep 0.4; qmp press a
     check archive "a archives the thread under the cursor" within 15 called "[\"threads\",\"archive\",\"$second\"]"
     sleep 2
-    qmp press k; sleep 0.4; qmp press e; sleep 0.8
-    qmp press ctrl-a; qmp type "Billing webhooks, renamed"; qmp press ret
-    check rename "e renames inline" within 15 called "[\"threads\",\"rename\",\"$first\",\"Billing webhooks, renamed\"]"
-    sleep 2
-    qmp press j; sleep 0.4; qmp press x; sleep 0.6
+    qmp press k; sleep 0.4; qmp press e
+    check rename "e opens the thread on ampcode.com to rename it there" within 15 argv_has "ampcode.com/threads/$first"
+    close_browser
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 1.5
+    qmp press j; sleep 0.3; qmp press j; sleep 0.4; qmp press x; sleep 0.6
     shot delete-confirm
     qmp press x
     check delete "x twice deletes" within 15 called '["threads","delete",'
@@ -278,6 +284,13 @@ PY
     sleep 40
     set_working 0 false; set_working 1 false
     check mute "a long turn notifies" within 30 notified "$long_t"
+    check private "its title is in no process's command line while it waits" not_in_argv "$long_t"
+    if ssh_session "omarchy-shell notifications act" 2>/dev/null | grep -q ok; then
+      check notify "its Open action opens the thread" within 15 argv_has "ampcode.com/threads/$(nid 1)"
+    else
+      note "this release's notification service has no act IPC; Open not clicked"
+    fi
+    close_browser
     check mute "a muted thread's turn does not" not_notified "$muted_t"
 
     set_working 2 true

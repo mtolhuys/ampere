@@ -6,21 +6,23 @@
 #
 #   ampere snapshot                     live + recent threads, merged
 #   ampere account                      plan, usage, credits, runners, version
-#   ampere search <query>               thread search
-#   ampere thread <action> <id> [arg]   archive | unarchive | rename | visibility | delete | markdown
+#   ampere catalog [limit]              every listed thread, for the panel's own search
+#   ampere thread <action> <id> [arg]   archive | unarchive | visibility | delete | markdown
 #   ampere open <url> [--webapp]        an ampcode.com page in the browser
 #   ampere continue <id> [dir]          resume a thread in a terminal
 #   ampere new <dir> [--mode m] [--fast]           first message from $AMPERE_PROMPT
 #   ampere exec <dir> [--mode m] [--fast] [--orb]  the prompt from $AMPERE_PROMPT
 #   ampere term <preset>                top | usage | update | login | account | doctor | config | skills | tools
-#   ampere copy <text>                  to the clipboard
-#   ampere notify <title> <body> [url]  desktop notification, Open opens url
+#   ampere copy <url>                   an ampcode.com link to the clipboard
+#   ampere notify                       $AMPERE_NOTIFY {title, body, url}; Open opens url
 import json
 import os
 import re
 import selectors
 import shutil
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -113,7 +115,7 @@ def data_env(amp):
 def desktop_env():
     env = dict(os.environ)
     env["PATH"] = launch_path()
-    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH", "AMPERE_SESSION_PATH", "AMPERE_PROMPT"):
+    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH", "AMPERE_SESSION_PATH", "AMPERE_PROMPT", "AMPERE_NOTIFY"):
         env.pop(key, None)
     return env
 
@@ -464,15 +466,14 @@ def cmd_account(args):
     })
 
 
-def cmd_search(args):
+def cmd_catalog(args):
+    """Every thread Amp lists, up to `limit`, for the panel to search itself:
+    a search term is private text, and `amp threads search` takes it only as
+    an argument, so it never leaves the panel."""
     amp = need_amp()
-    query = clean(" ".join(args)).strip()[:200]
-    if not query:
-        emit({"ok": True, "query": "", "threads": []})
-        return
-    found = json.loads(run_amp(amp, ["threads", "search", "--json", "-n", "30", query], timeout=20) or "[]")
-    rows = merge_threads([], found if isinstance(found, list) else [])
-    emit({"ok": True, "query": query, "threads": rows})
+    limit = int(args[0]) if args and args[0].isdigit() else 500
+    found = json.loads(run_amp(amp, ["threads", "list", "--json", "--limit", str(max(10, min(1000, limit)))], timeout=20) or "[]")
+    emit({"ok": True, "threads": merge_threads([], found if isinstance(found, list) else [])})
 
 
 def cmd_thread(args):
@@ -484,11 +485,6 @@ def cmd_thread(args):
         run_amp(amp, ["threads", "archive", tid])
     elif action == "unarchive":
         run_amp(amp, ["threads", "archive", "--unarchive", tid])
-    elif action == "rename":
-        name = clean(" ".join(args[2:])).strip()[:200]
-        if not name:
-            raise Fail("a thread needs a name")
-        run_amp(amp, ["threads", "rename", tid, name])
     elif action == "visibility":
         value = args[2] if len(args) > 2 else ""
         if value not in VISIBILITIES:
@@ -522,8 +518,11 @@ def copy_bytes(data):
 
 
 def cmd_copy(args):
-    text = " ".join(args)[:MAX_MARKDOWN]
-    copy_bytes(text.encode("utf-8"))
+    """A thread's link; anything else copied (Markdown) goes through stdin."""
+    url = args[0] if args else ""
+    if not AMP_URL.match(url):
+        raise Fail("only ampcode.com links are copied from here")
+    copy_bytes(url.encode("utf-8"))
     emit({"ok": True})
 
 
@@ -639,37 +638,260 @@ def cmd_term(args):
     emit({"ok": True})
 
 
+# ------------------------------------------------------------------ notifications
+# A thread's title is conversation text, so it never rides in an argv: the
+# panel hands the notification over in the environment, the waiter gets it on
+# stdin, and it reaches the notification server over the session bus from
+# here. notify-send would take it as arguments, so this speaks just enough
+# D-Bus itself: EXTERNAL auth, Hello, AddMatch, Notify, and the two signals.
+
+class Bus:
+    def __init__(self, address):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(10)
+        self.sock.connect(bus_path(address))
+        self.sock.sendall(b"\0AUTH EXTERNAL " + str(os.getuid()).encode().hex().encode() + b"\r\n")
+        if not self._line().startswith(b"OK "):
+            raise OSError("the session bus refused EXTERNAL auth")
+        self.sock.sendall(b"BEGIN\r\n")
+        self.serial = 0
+        self.buffer = b""
+        self.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "Hello", "", [])
+
+    def _line(self):
+        data = b""
+        while not data.endswith(b"\r\n"):
+            chunk = self.sock.recv(1)
+            if not chunk:
+                raise OSError("the session bus closed during auth")
+            data += chunk
+        return data
+
+    def send(self, destination, path, interface, member, signature, args):
+        self.serial += 1
+        self.sock.sendall(method_call(self.serial, destination, path, interface, member, signature, args))
+        return self.serial
+
+    def call(self, destination, path, interface, member, signature, args):
+        serial = self.send(destination, path, interface, member, signature, args)
+        while True:
+            kind, fields, body = self.receive()
+            if fields.get(5) == serial:
+                if kind == 3:
+                    raise OSError("D-Bus error: %s" % fields.get(4, "unknown"))
+                return body
+
+    def receive(self):
+        while True:
+            message = take_message(self.buffer)
+            if message:
+                self.buffer = self.buffer[message[3]:]
+                return message[:3]
+            chunk = self.sock.recv(65536)
+            if not chunk:
+                raise OSError("the session bus closed")
+            self.buffer += chunk
+
+
+def method_call(serial, destination, path, interface, member, signature, args):
+    body = Marshal()
+    body.values(signature, args)
+    fields = [(1, ("o", path)), (2, ("s", interface)), (3, ("s", member)), (6, ("s", destination))]
+    if signature:
+        fields.append((8, ("g", signature)))
+    head = Marshal()
+    head.raw(b"l\x01\x00\x01")
+    head.values("uu", [len(body.data), serial])
+    head.values("a(yv)", [fields])
+    head.align(8)
+    return head.data + body.data
+
+
+def bus_path(address):
+    """The socket of a unix: session bus address; an abstract one starts with NUL."""
+    for part in address.split(";"):
+        if not part.startswith("unix:"):
+            continue
+        keys = dict(kv.split("=", 1) for kv in part[5:].split(",") if "=" in kv)
+        if "path" in keys:
+            return keys["path"]
+        if "abstract" in keys:
+            return "\0" + keys["abstract"]
+    raise OSError("no unix socket in DBUS_SESSION_BUS_ADDRESS")
+
+
+class Marshal:
+    """Little-endian D-Bus marshalling for the types a notification needs."""
+
+    def __init__(self):
+        self.data = b""
+
+    def raw(self, data):
+        self.data += data
+
+    def align(self, n):
+        self.data += b"\0" * (-len(self.data) % n)
+
+    def values(self, signature, args):
+        types = split_signature(signature)
+        for kind, value in zip(types, args):
+            self.value(kind, value)
+
+    def value(self, kind, value):
+        if kind == "y":
+            self.raw(struct.pack("<B", value))
+        elif kind in ("u", "i"):
+            self.align(4)
+            self.raw(struct.pack("<I" if kind == "u" else "<i", value))
+        elif kind in ("s", "o"):
+            data = value.encode("utf-8")
+            self.align(4)
+            self.raw(struct.pack("<I", len(data)) + data + b"\0")
+        elif kind == "g":
+            data = value.encode("ascii")
+            self.raw(struct.pack("<B", len(data)) + data + b"\0")
+        elif kind.startswith("a"):
+            item = kind[1:]
+            self.align(4)
+            at = len(self.data)
+            self.raw(b"\0\0\0\0")
+            self.align(8 if item[0] in "({" else ALIGN.get(item[0], 4))
+            start = len(self.data)
+            for element in value:
+                self.value(item, element)
+            self.data = self.data[:at] + struct.pack("<I", len(self.data) - start) + self.data[at + 4:]
+        elif kind[0] in "({":
+            self.align(8)
+            self.values(kind[1:-1], value)
+        elif kind == "v":
+            signature, inner = value
+            self.value("g", signature)
+            self.value(signature, inner)
+        else:
+            raise ValueError("cannot marshal " + kind)
+
+
+ALIGN = {"y": 1, "g": 1, "u": 4, "i": 4, "s": 4, "o": 4, "a": 4, "v": 1}
+
+
+def split_signature(signature):
+    """'susa{sv}i' -> ['s', 'u', 's', 'a{sv}', 'i']."""
+    out, i = [], 0
+    while i < len(signature):
+        j = i
+        while signature[j] == "a":
+            j += 1
+        if signature[j] in "({":
+            depth, k = 0, j
+            while True:
+                depth += signature[k] in "({"
+                depth -= signature[k] in ")}"
+                k += 1
+                if depth == 0:
+                    break
+            j = k
+        else:
+            j += 1
+        out.append(signature[i:j])
+        i = j
+    return out
+
+
+def take_message(data):
+    """One whole message from the front of `data`: (type, fields, body, length), or None."""
+    if len(data) < 16:
+        return None
+    if data[0:1] != b"l":
+        raise OSError("big-endian D-Bus messages are not supported")
+    body_len, _, fields_len = struct.unpack_from("<III", data, 4)
+    head_end = 16 + fields_len + (-(16 + fields_len) % 8)
+    if len(data) < head_end + body_len:
+        return None
+    fields, at = {}, 16
+    while at < 16 + fields_len:
+        at += -at % 8
+        code = data[at]
+        signature, at = read_value(data, at + 1, "g")
+        value, at = read_value(data, at, signature)
+        fields[code] = value
+    body, values, at = data[head_end:head_end + body_len], [], 0
+    for kind in split_signature(fields.get(8, "")):
+        if kind not in ("u", "i", "s", "o", "g", "y"):
+            break
+        value, at = read_value(body, at, kind)
+        values.append(value)
+    return data[1], fields, values, head_end + body_len
+
+
+def read_value(data, at, kind):
+    if kind == "y":
+        return data[at], at + 1
+    if kind in ("u", "i"):
+        at += -at % 4
+        return struct.unpack_from("<I" if kind == "u" else "<i", data, at)[0], at + 4
+    if kind in ("s", "o"):
+        at += -at % 4
+        n = struct.unpack_from("<I", data, at)[0]
+        return data[at + 4:at + 4 + n].decode("utf-8", "replace"), at + 5 + n
+    if kind == "g":
+        n = data[at]
+        return data[at + 1:at + 1 + n].decode("ascii", "replace"), at + 2 + n
+    raise OSError("unexpected D-Bus header type " + kind)
+
+
 def cmd_notify(args):
-    if len(args) < 2:
-        raise Fail("notify needs a title and a body")
-    title, body = clean(args[0])[:200], clean(args[1])[:400]
-    url = args[2] if len(args) > 2 and AMP_URL.match(args[2]) else ""
-    icon = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "assets", "ampere.svg")
-    detach([sys.executable, "-I", "-S", os.path.realpath(__file__), "_notify-wait", title, body, url, icon])
+    """The notification from $AMPERE_NOTIFY ({title, body, url}), shown by a
+    waiter in its own session, which opens the url when Open is clicked."""
+    try:
+        note = json.loads(os.environ.get("AMPERE_NOTIFY", "") or "{}")
+    except ValueError:
+        note = {}
+    title = clean(str(note.get("title") or "")).strip()[:200]
+    if not title:
+        raise Fail("notify needs a title")
+    url = str(note.get("url") or "")
+    payload = {"title": title, "body": clean(str(note.get("body") or ""))[:400], "url": url if AMP_URL.match(url) else ""}
+    detach([sys.executable, "-I", "-S", os.path.realpath(__file__), "_notify-wait"], stdin_text=json.dumps(payload))
     emit({"ok": True})
 
 
-def notify_wait(args):
-    title, body, url, icon = (args + ["", "", "", ""])[:4]
-    sender = shutil.which("notify-send", path="/usr/bin")
-    if not sender:
-        return
-    argv = [sender, "-a", "Ampere", "-i", icon if os.path.isfile(icon) else "dialog-information"]
-    if url:
-        argv += ["--action=default=Open", "--action=open=Open thread", "--wait"]
-    argv += [title, body]
+def notify_wait():
     try:
-        done = subprocess.run(argv, env=desktop_env(), capture_output=True, text=True, timeout=3600)
-    except subprocess.TimeoutExpired:
+        note = json.loads(sys.stdin.read(65536) or "{}")
+    except ValueError:
         return
-    if url and done.stdout.strip() in ("default", "open"):
-        cmd_open([url])
+    icon = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "assets", "ampere.svg")
+    url = note.get("url", "")
+    actions = ["default", "Open", "open", "Open thread"] if url else []
+    try:
+        bus = Bus(os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""))
+        bus.call("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "AddMatch", "s",
+                 ["type='signal',interface='org.freedesktop.Notifications'"])
+        reply = bus.call("org.freedesktop.Notifications", "/org/freedesktop/Notifications", "org.freedesktop.Notifications",
+                         "Notify", "susssasa{sv}i",
+                         ["Ampere", 0, icon if os.path.isfile(icon) else "dialog-information",
+                          note.get("title", ""), note.get("body", ""), actions, [], -1])
+        if not url or not reply:
+            return
+        nid = reply[0]
+        bus.sock.settimeout(3600)
+        while True:
+            _, fields, body = bus.receive()
+            if len(body) < 2 or body[0] != nid:
+                continue
+            if fields.get(3) == "ActionInvoked" and body[1] in ("default", "open"):
+                cmd_open([url])
+                return
+            if fields.get(3) == "NotificationClosed":
+                return
+    except (OSError, ValueError, socket.timeout):
+        return
 
 
 COMMANDS = {
     "snapshot": cmd_snapshot,
     "account": cmd_account,
-    "search": cmd_search,
+    "catalog": cmd_catalog,
     "thread": cmd_thread,
     "open": cmd_open,
     "continue": cmd_continue,
@@ -683,7 +905,7 @@ COMMANDS = {
 
 def main(argv):
     if len(argv) > 1 and argv[1] == "_notify-wait":
-        notify_wait(argv[2:])
+        notify_wait()
         return 0
     if len(argv) < 2 or argv[1] not in COMMANDS:
         emit({"ok": False, "error": "usage: ampere " + " | ".join(COMMANDS)})

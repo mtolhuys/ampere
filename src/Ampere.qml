@@ -82,6 +82,8 @@ Panel {
   // ------------------------------------------------------------ list + cursor
   property string query: ""
   property var results: []
+  property var catalog: []
+  property double catalogAt: 0
   property bool searching: false
   property bool showAll: false
   readonly property bool inSearch: query.trim() !== ""
@@ -90,7 +92,6 @@ Panel {
   property bool cursorActive: false
   readonly property var current: rows.length > 0 ? rows[Math.max(0, Math.min(cursor, rows.length - 1))] : null
 
-  property string renamingId: ""
   property string confirmId: ""
   property string busyId: ""
 
@@ -147,7 +148,6 @@ Panel {
 
   onOpenedChanged: {
     if (!opened) {
-      renamingId = ""
       confirmId = ""
       return
     }
@@ -197,17 +197,25 @@ Panel {
     onFinished: result => root.applyAccount(result)
   }
 
+  // Search runs here, over every thread Amp lists: `amp threads search`
+  // takes the term only as an argument, and a search term is private text.
   Run {
-    id: searchRun
+    id: catalogRun
+    command: [root.helper, "catalog", "500"]
     environment: root.helperEnv
     deadlineMs: 25000
-    keepBytes: 1048576
+    maxBytes: 4194304
+    keepBytes: 4194304
     onFinished: result => {
-      root.searching = false
       var data = Model.parseJson(result.stdout)
       if (data && data.ok) {
-        if (data.query === root.query.trim()) root.results = data.threads
-      } else root.say(root.failure(result, data, "Search failed"), true)
+        root.catalog = data.threads || []
+        root.catalogAt = Date.now()
+        root.filterSearch()
+      } else {
+        root.searching = false
+        root.say(root.failure(result, data, "Search failed"), true)
+      }
     }
   }
 
@@ -420,11 +428,15 @@ Panel {
   }
 
   function runSearch() {
-    var q = query.trim()
-    if (!q) { results = []; searching = false; return }
+    if (!query.trim()) { results = []; searching = false; return }
+    if (Date.now() - catalogAt < 60000) { filterSearch(); return }
     searching = true
-    searchRun.command = [helper, "search", q]
-    searchRun.start()
+    if (!catalogRun.running) catalogRun.start()
+  }
+
+  function filterSearch() {
+    searching = false
+    results = Model.search(catalog, threads, query, 40)
   }
 
   function setQuery(text) {
@@ -449,8 +461,11 @@ Panel {
     launchRun.start()
   }
 
+  // Thread titles are conversation text: they go to the helper in the
+  // environment, never in the command line.
   function notify(title, body, url) {
-    notifyRun.command = [helper, "notify", title, body].concat(url ? [url] : [])
+    notifyRun.environment = Object.assign({}, helperEnv, { AMPERE_NOTIFY: JSON.stringify({ title: title, body: body, url: url || "" }) })
+    notifyRun.command = [helper, "notify"]
     notifyRun.start()
   }
 
@@ -475,7 +490,7 @@ Panel {
     else if (name === "continue") continueThread(row)
     else if (name === "copy") launch(["copy", row.url], "Link copied")
     else if (name === "markdown") runAction("markdown", row)
-    else if (name === "rename") { renamingId = row.id; confirmId = "" }
+    else if (name === "rename") { say("Rename it on ampcode.com", false); openUrl(row.url) }
     else if (name === "archive") runAction("archive", row)
     else if (name === "mute") toggleThreadMute(row)
     else if (name === "delete") {
@@ -498,22 +513,14 @@ Panel {
     busyId = ""
     var data = Model.parseJson(result.stdout)
     if (!data || !data.ok) { say(failure(result, data, "Amp refused"), true); return }
-    var words = { archive: "Archived", delete: "Deleted", rename: "Renamed", markdown: "Markdown copied", visibility: "Visibility changed" }
+    var words = { archive: "Archived", delete: "Deleted", markdown: "Markdown copied", visibility: "Visibility changed" }
     say(words[verb] || "Done", false)
     if (verb === "archive" || verb === "delete") {
       threads = threads.filter(function(r) { return r.id !== id })
       results = results.filter(function(r) { return r.id !== id })
     }
     if (verb !== "markdown") refreshSnapshot()
-    if (verb === "rename" && inSearch) runSearch()
-  }
-
-  function acceptRename(row, name) {
-    renamingId = ""
-    keyFocus()
-    var clean = String(name || "").trim()
-    if (!clean || clean === row.title) return
-    runAction("rename", row, clean)
+    if (verb === "archive" || verb === "delete") catalog = catalog.filter(function(r) { return r.id !== id })
   }
 
   function startAsk(route) {
@@ -707,7 +714,6 @@ Panel {
       id: keys
       implicitHeight: column.implicitHeight
       anchors.fill: parent
-      blocked: root.renamingId !== ""
 
       function rowAt(i) { return rowRepeater.itemAt(i) }
       function reveal(item) {
@@ -1076,7 +1082,6 @@ Panel {
                 thread: modelData
                 now: root.now
                 hasCursor: root.cursorActive && root.cursor === index
-                renaming: root.renamingId === modelData.id
                 confirming: root.confirmId === modelData.id
                 busy: root.busyId === modelData.id
                 muted: root.mutedThreads.indexOf(modelData.id) >= 0
@@ -1090,8 +1095,6 @@ Panel {
                 onHovered: root.pointAt(index)
                 onActivated: { root.pointAt(index); root.threadAction("open", modelData) }
                 onAction: function(name) { root.pointAt(index); root.threadAction(name, modelData) }
-                onRenameAccepted: function(name) { root.acceptRename(modelData, name) }
-                onRenameCancelled: { root.renamingId = ""; root.keyFocus() }
               }
             }
 

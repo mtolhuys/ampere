@@ -145,4 +145,18 @@ test("only long, unmuted turns notify", () => {
   assert.deepEqual(M.notifiable([], starts, NOW, 30, []), [])
 })
 
+test("search matches every word in title, project or directory", () => {
+  const catalog = [
+    { id: "1", title: "Refactor the billing webhooks", project: "atlas", dir: "/h/work/atlas" },
+    { id: "2", title: "Billing export", project: "beacon", dir: "" },
+    { id: "3", title: "Dark theme tokens", project: "atlas", dir: "" },
+  ]
+  const live = [{ id: "1", title: "Refactor the billing webhooks", working: true }]
+  assert.deepEqual(M.search(catalog, live, "BILLING", 40).map(r => r.id), ["1", "2"])
+  assert.deepEqual(M.search(catalog, live, "billing atlas", 40).map(r => r.id), ["1"])
+  assert.equal(M.search(catalog, live, "billing atlas", 40)[0].working, true)
+  assert.deepEqual(M.search(catalog, live, "  ", 40), [])
+  assert.deepEqual(M.search(catalog, live, "a", 2).length, 2)
+})
+
 process.stdout.write(`\n${count} passed\n`)

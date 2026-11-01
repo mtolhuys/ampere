@@ -209,11 +209,116 @@ class PromptPrivacy(unittest.TestCase):
                 os.environ["XDG_RUNTIME_DIR"] = saved
 
 
+class Notifications(unittest.TestCase):
+    """Titles reach the notification server over D-Bus, never in an argv."""
+
+    def test_a_method_call_round_trips(self):
+        args = ["Ampere", 0, "icon", "Amp finished a turn", SECRET, ["default", "Open"], [], -1]
+        data = ampere.method_call(7, "org.freedesktop.Notifications", "/org/freedesktop/Notifications",
+                                  "org.freedesktop.Notifications", "Notify", "susssasa{sv}i", args)
+        kind, fields, body, length = ampere.take_message(data + b"rest")
+        self.assertEqual((kind, length), (1, len(data)))
+        self.assertEqual(fields[3], "Notify")
+        self.assertEqual(fields[8], "susssasa{sv}i")
+        self.assertEqual(body, ["Ampere", 0, "icon", "Amp finished a turn", SECRET])
+        self.assertIsNone(ampere.take_message(data[:-1]))
+
+    def test_signatures_split(self):
+        self.assertEqual(ampere.split_signature("susssasa{sv}i"), ["s", "u", "s", "s", "s", "as", "a{sv}", "i"])
+        self.assertEqual(ampere.split_signature("a(yv)u"), ["a(yv)", "u"])
+
+    def test_bus_addresses(self):
+        self.assertEqual(ampere.bus_path("unix:path=/run/user/1000/bus"), "/run/user/1000/bus")
+        self.assertEqual(ampere.bus_path("unix:abstract=x,guid=1"), "\0x")
+        with self.assertRaises(OSError):
+            ampere.bus_path("tcp:host=localhost")
+
+    def test_notify_takes_its_text_from_the_environment(self):
+        env = {"PATH": "/usr/bin", "HOME": tempfile.gettempdir(), "LANG": "C.UTF-8"}
+        done = subprocess.run([HELPER, "notify"], capture_output=True, text=True, env=env, timeout=20)
+        self.assertEqual(json.loads(done.stdout)["error"], "notify needs a title")
+        env["AMPERE_NOTIFY"] = json.dumps({"title": "Amp finished a turn", "body": SECRET, "url": "https://ampcode.com/"})
+        env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/nonexistent/bus"
+        done = subprocess.run([HELPER, "notify"], capture_output=True, text=True, env=env, timeout=20)
+        self.assertEqual(json.loads(done.stdout), {"ok": True})
+
+
+FAKE_SERVER = r"""
+import sys
+from gi.repository import Gio, GLib
+XML = '<node><interface name="org.freedesktop.Notifications"><method name="Notify">' + "".join(
+    '<arg type="%s" direction="in"/>' % t for t in ["s", "u", "s", "s", "s", "as", "a{sv}", "i"]) + '<arg type="u" direction="out"/></method></interface></node>'
+conn = Gio.DBusConnection.new_for_address_sync(sys.argv[1], Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+loop = GLib.MainLoop()
+def call(conn, sender, path, iface, method, params, invocation):
+    args = params.unpack()
+    with open(sys.argv[2], "w") as f:
+        f.write(repr(args))
+    invocation.return_value(GLib.Variant("(u)", (7,)))
+    GLib.timeout_add(200, lambda: conn.emit_signal(None, "/org/freedesktop/Notifications", "org.freedesktop.Notifications", "ActionInvoked", GLib.Variant("(us)", (7, "open"))) or False)
+conn.register_object("/org/freedesktop/Notifications", Gio.DBusNodeInfo.new_for_xml(XML).interfaces[0], call, None, None)
+Gio.bus_own_name_on_connection(conn, "org.freedesktop.Notifications", 0, lambda *a: print("ready", flush=True), None)
+GLib.timeout_add_seconds(20, loop.quit)
+loop.run()
+"""
+
+
+def have_gi():
+    return subprocess.run(["/usr/bin/python3", "-c", "import gi"], capture_output=True).returncode == 0 and os.path.exists("/usr/bin/dbus-daemon")
+
+
+@unittest.skipUnless(have_gi(), "needs python-gobject and dbus-daemon")
+class NotificationRoundTrip(unittest.TestCase):
+    """A real bus, a stand-in notification server that clicks Open: the waiter
+    sends the title over D-Bus and opens the thread."""
+
+    def test_open_opens_the_thread(self):
+        home = tempfile.mkdtemp()
+        launcher_dir = os.path.join(home, ".local/share/omarchy/bin")
+        os.makedirs(launcher_dir)
+        opened = os.path.join(home, "opened")
+        with open(os.path.join(launcher_dir, "omarchy-launch-browser"), "w") as f:
+            f.write('#!/usr/bin/bash\nprintf %%s "$1" > "%s"\n' % opened)
+        os.chmod(os.path.join(launcher_dir, "omarchy-launch-browser"), 0o755)
+        daemon = subprocess.Popen(["/usr/bin/dbus-daemon", "--session", "--nofork", "--print-address",
+                                   "--address=unix:abstract=ampere-test-%d" % os.getpid()], stdout=subprocess.PIPE, text=True)
+        try:
+            address = daemon.stdout.readline().strip()
+            seen = os.path.join(home, "notify-args")
+            server = subprocess.Popen(["/usr/bin/python3", "-c", FAKE_SERVER, address, seen], stdout=subprocess.PIPE, text=True)
+            self.assertEqual(server.stdout.readline().strip(), "ready")
+            url = "https://ampcode.com/threads/" + TID
+            env = {"PATH": "/usr/bin", "HOME": home, "LANG": "C.UTF-8", "DBUS_SESSION_BUS_ADDRESS": address,
+                   "AMPERE_NOTIFY": json.dumps({"title": "Amp finished a turn", "body": SECRET, "url": url})}
+            done = subprocess.run([HELPER, "notify"], capture_output=True, text=True, env=env, timeout=20)
+            self.assertEqual(json.loads(done.stdout), {"ok": True})
+            for _ in range(100):
+                if os.path.exists(opened):
+                    break
+                time.sleep(0.1)
+            with open(seen) as f:
+                args = f.read()
+            self.assertIn(SECRET, args)
+            self.assertIn("'Ampere'", args)
+            self.assertIn("['default', 'Open', 'open', 'Open thread']", args)
+            with open(opened) as f:
+                self.assertEqual(f.read(), url)
+            server.kill()
+            server.wait()
+            server.stdout.close()
+        finally:
+            daemon.kill()
+            daemon.wait()
+            daemon.stdout.close()
+
+
 class Cli(unittest.TestCase):
     def test_refusals_are_json(self):
         self.assertEqual(run("thread", "archive", "nope")[1]["ok"], False)
         self.assertEqual(run("open", "https://evil.io/")[1]["error"], "only ampcode.com pages open from here")
         self.assertEqual(run("term", "rm")[1]["error"], "unknown preset")
+        self.assertEqual(run("thread", "rename", TID, "x", env_extra={"AMPERE_AMP": "/usr/bin/true"})[1]["error"], "unknown thread action rename")
+        self.assertEqual(run("search", "x")[0], 2)
         code, out = run("nonsense")
         self.assertEqual(code, 2)
 

@@ -12,7 +12,6 @@ CursorSurface {
 
   property var thread: ({})
   property double now: Date.now()
-  property bool renaming: false
   property bool confirming: false
   property bool busy: false
   property bool muted: false
@@ -26,8 +25,6 @@ CursorSurface {
   signal hovered()
   signal activated()
   signal action(string name)
-  signal renameAccepted(string name)
-  signal renameCancelled()
 
   readonly property string phase: Model.state(thread)
   readonly property bool hot: hasCursor || mouse.containsMouse
@@ -108,7 +105,6 @@ CursorSurface {
 
     Text {
       textFormat: Text.PlainText
-      visible: !root.renaming
       width: parent.width
       text: root.thread.title || "Untitled thread"
       color: root.foreground
@@ -118,21 +114,6 @@ CursorSurface {
       elide: Text.ElideRight
     }
 
-    TextField {
-      id: nameField
-      visible: root.renaming
-      width: parent.width
-      verticalPadding: Style.space(3)
-      foreground: root.foreground
-      accent: root.accent
-      font.family: root.fontFamily
-      placeholderText: "New name"
-      onVisibleChanged: if (visible) { text = root.thread.title || ""; forceActiveFocus(); selectAll() }
-      Keys.onReturnPressed: root.renameAccepted(text)
-      Keys.onEnterPressed: root.renameAccepted(text)
-      Keys.onEscapePressed: root.renameCancelled()
-    }
-
     Row {
       width: parent.width
       spacing: 0
@@ -140,7 +121,7 @@ CursorSurface {
       Text {
         id: projectText
         textFormat: Text.PlainText
-        visible: !root.confirming && !root.renaming && text !== ""
+        visible: !root.confirming && text !== ""
         text: root.thread.project || ""
         color: root.projectColor
         font.family: root.fontFamily
@@ -152,8 +133,7 @@ CursorSurface {
         textFormat: Text.PlainText
         width: parent.width - (projectText.visible ? projectText.implicitWidth : 0)
         text: root.confirming ? "Press x again to delete this thread for good"
-          : (root.renaming ? "Enter saves  ·  Esc cancels"
-            : (projectText.visible && Model.subtitleRest(root.thread, root.now) ? "  ·  " : "") + Model.subtitleRest(root.thread, root.now))
+          : (projectText.visible && Model.subtitleRest(root.thread, root.now) ? "  ·  " : "") + Model.subtitleRest(root.thread, root.now)
         color: root.confirming ? root.urgent : Util.alpha(root.foreground, 0.5)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -175,7 +155,7 @@ CursorSurface {
       textFormat: Text.PlainText
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      visible: !actions.visible && !root.renaming
+      visible: !actions.visible
       text: (root.muted ? "󰂛  " : "") + (root.busy ? "…" : (root.thread.working ? "live" : Model.ago(root.thread.updatedAt, root.now)))
       color: root.thread.working ? root.tint : Util.alpha(root.foreground, 0.42)
       font.family: root.fontFamily
@@ -188,7 +168,7 @@ CursorSurface {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       spacing: Style.space(2)
-      visible: root.hot && !root.renaming && !root.confirming
+      visible: root.hot && !root.confirming
       opacity: visible ? 1 : 0
       Behavior on opacity { NumberAnimation { duration: (Style.reduceMotion === true ? 0 : 120) } }
 
@@ -197,7 +177,7 @@ CursorSurface {
           { name: "continue", glyph: "󰆍", tip: "Continue in a terminal  (c)" },
           { name: "open", glyph: "󰖟", tip: "Open on ampcode.com  (Enter)" },
           { name: "copy", glyph: "󰆏", tip: "Copy link  (y)" },
-          { name: "rename", glyph: "󰏫", tip: "Rename  (e)" },
+          { name: "rename", glyph: "󰏫", tip: "Rename on ampcode.com  (e)" },
           { name: "archive", glyph: "󰀼", tip: "Archive  (a)" },
           { name: "mute", glyph: root.muted ? "󰂚" : "󰂛", tip: root.muted ? "Notify for this thread again  (q)" : "No notifications for this thread  (q)" }
         ]

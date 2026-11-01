@@ -79,6 +79,15 @@ omarchy plugin add https://github.com/mtolhuys/omarchy-ampere.git
 
 The bolt lands in the bar's right section; drag it anywhere on the bar.
 
+### Uninstall
+
+```bash
+omarchy plugin remove io.github.mtolhuys.ampere
+rm -rf ~/.local/state/io.github.mtolhuys.ampere   # the remembered directory, mode and Fast
+```
+
+Ampere changes nothing in Amp's own settings, and nothing else to clean up.
+
 ### Keybindings (optional)
 
 Ampere answers over IPC, so you can bind it in `~/.config/hypr/bindings.lua`:

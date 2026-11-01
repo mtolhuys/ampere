@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.mtolhuys.ampere",
+  "name": "Ampere",
+  "version": "0.1.0",
+  "author": "Maarten Tolhuijs",
+  "license": "MIT",
+  "description": "Amp in your bar: a live current of the threads Amp is working on, your plan's allowance on pace, every recent thread with its actions, search, and one box that starts new work in a terminal, in the background or in an orb.",
+  "icon": "assets/ampere.svg",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "src/Ampere.qml"
+  },
+  "barWidget": {
+    "displayName": "Ampere",
+    "description": "Amp threads, usage and actions. Glows while Amp works and notifies you when a turn finishes.",
+    "category": "AI",
+    "aliases": ["amp", "ampcode", "ampere", "agent", "threads"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "pollIdleSec": 60,
+      "pollActiveSec": 8,
+      "threadCount": 6,
+      "notifyOnFinish": true,
+      "showUsage": true,
+      "linkBehavior": "Browser tab",
+      "ampPath": ""
+    },
+    "schema": [
+      { "key": "notifyOnFinish", "type": "boolean", "label": "Notify when a thread finishes a turn", "defaultValue": true, "description": "A desktop notification with an Open action whenever a thread that was working goes quiet." },
+      { "key": "showUsage", "type": "boolean", "label": "Show plan usage", "defaultValue": true, "description": "Agent usage and orb hours, with a marker for an even spend through the period." },
+      { "key": "threadCount", "type": "integer", "label": "Threads shown", "min": 3, "max": 20, "step": 1, "defaultValue": 6 },
+      { "key": "linkBehavior", "type": "enum", "label": "Open threads in", "options": ["Browser tab", "Web app window"], "defaultValue": "Browser tab", "description": "A web app window needs a Chromium-based default browser." },
+      { "key": "pollActiveSec", "type": "integer", "label": "Refresh while Amp works (seconds)", "min": 4, "max": 120, "step": 1, "defaultValue": 8 },
+      { "key": "pollIdleSec", "type": "integer", "label": "Refresh while idle (seconds)", "min": 20, "max": 900, "step": 10, "defaultValue": 60 },
+      { "key": "ampPath", "type": "string", "label": "Amp CLI path", "defaultValue": "", "description": "Leave empty to find it in ~/.local/bin, ~/.amp/bin or mise." }
+    ]
+  }
+}

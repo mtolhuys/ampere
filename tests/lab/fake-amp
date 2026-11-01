@@ -1,0 +1,146 @@
+#!/usr/bin/python3
+# A stand-in for the Amp CLI inside the lab guest: the same commands and the
+# same output shapes Ampere reads (amp 0.0.1793534443), answered from a state
+# file instead of ampcode.com, so no Amp account or credential ever enters
+# the guest. Every call is appended to ~/.fake-amp/calls.log as one JSON line
+# for the suite to assert on. Interactive commands print what they would do
+# and wait, so a terminal they open has something on screen.
+import json
+import os
+import sys
+import time
+
+HOME = os.environ.get("HOME", "/tmp")
+DIR = os.path.join(HOME, ".fake-amp")
+STATE = os.path.join(DIR, "state.json")
+LOG = os.path.join(DIR, "calls.log")
+
+
+def load():
+    with open(STATE) as f:
+        return json.load(f)
+
+
+def save(state):
+    tmp = STATE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE)
+
+
+def log(argv):
+    os.makedirs(DIR, exist_ok=True)
+    with open(LOG, "a") as f:
+        f.write(json.dumps({"argv": argv, "cwd": os.getcwd(), "at": time.time()}) + "\n")
+
+
+def flag(args, name):
+    return name in args
+
+
+def value(args, name, default=None):
+    return args[args.index(name) + 1] if name in args and args.index(name) + 1 < len(args) else default
+
+
+def listed(state, limit):
+    rows = [t for t in state["threads"] if not t.get("archived")]
+    rows.sort(key=lambda t: t["updated"], reverse=True)
+    return [{"id": t["id"], "title": t["title"], "updated": t["updated"], "tree": t.get("tree", ""), "messageCount": t.get("messageCount", 0)} for t in rows[:limit]]
+
+
+def top(state):
+    out = []
+    for t in sorted(state["threads"], key=lambda t: t["updated"], reverse=True)[:9]:
+        if t.get("archived"):
+            continue
+        out.append({
+            "id": t["id"], "title": t["title"], "url": "https://ampcode.com/threads/" + t["id"],
+            "project": t.get("project", ""), "status": "working" if t.get("working") else t.get("status", "1d"),
+            "updatedAt": t["updated"], "working": bool(t.get("working")), "executorConnected": bool(t.get("connected")),
+        })
+    return out
+
+
+USAGE = """Signed in as lab@example.invalid (labuser)
+**Amp Megawatt Tier:** agent usage $13.40 of $20 remaining (67%), orb usage 512.0h of 750h a1.small orb hours remaining (68%) - period 2026-10-20 to 2026-11-20, resets upon renewal in 9 days
+**Individual credits:** $4.50 remaining - https://ampcode.com/settings
+
+## How Usage Is Charged
+
+- Models served by Amp: the token list price.
+"""
+
+
+def main(args):
+    log(args)
+    if not args or args[0] in ("-V", "--version", "version", "-v"):
+        if args:
+            print("0.0.9999999999-lab (released 2026-11-01T00:00:00.000Z, lab fixture)")
+            return 0
+    state = load()
+    if args[:1] == ["usage"]:
+        sys.stdout.write(USAGE)
+        return 0
+    if args[:2] == ["runner", "list"]:
+        print("lab-runner  ~/work/atlas")
+        print("  ~/work/beacon")
+        return 0
+    if args[:2] == ["top", "--stream-jsonl"]:
+        print(json.dumps({"updatedAt": "now", "threads": [], "reconnecting": False}), flush=True)
+        time.sleep(0.3)
+        print(json.dumps({"updatedAt": "now", "threads": top(load()), "reconnecting": False}), flush=True)
+        time.sleep(600)
+        return 0
+    if args[:2] in (["threads", "list"], ["t", "list"]):
+        print(json.dumps(listed(state, int(value(args, "--limit", "40"))), indent=2))
+        return 0
+    if args[:2] == ["threads", "search"]:
+        q = args[-1].lower()
+        hits = [{"id": t["id"], "title": t["title"], "updatedAt": t["updated"]} for t in state["threads"] if q in t["title"].lower()]
+        print(json.dumps(hits, indent=2))
+        return 0
+    if args[:2] == ["threads", "archive"]:
+        tid = args[-1]
+        for t in state["threads"]:
+            if t["id"] == tid:
+                t["archived"] = not flag(args, "--unarchive")
+        save(state)
+        return 0
+    if args[:2] == ["threads", "rename"]:
+        for t in state["threads"]:
+            if t["id"] == args[2]:
+                t["title"] = args[3]
+        save(state)
+        return 0
+    if args[:2] == ["threads", "delete"]:
+        state["threads"] = [t for t in state["threads"] if t["id"] != args[2]]
+        save(state)
+        return 0
+    if args[:2] == ["threads", "share"]:
+        return 0
+    if args[:2] == ["threads", "markdown"]:
+        title = next((t["title"] for t in state["threads"] if t["id"] == args[2]), "?")
+        print("# " + title + "\n\n## User\n\nMake it beautiful.\n\n## Assistant\n\nDone.")
+        return 0
+    if "-x" in args:
+        prompt = value(args, "-x", "")
+        tid = "T-%08x-0000-4000-8000-%012x" % (int(time.time()) & 0xFFFFFFFF, len(state["threads"]))
+        state["threads"].append({"id": tid, "title": prompt[:60], "updated": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                 "working": True, "connected": "-ox" not in args, "project": os.path.basename(os.getcwd()),
+                                 "tree": "" if "-ox" in args else "file://" + os.getcwd(), "messageCount": 1})
+        save(state)
+        return 0
+    # Interactive: the TUI, threads continue, top, update, login and the rest.
+    print("\033[1mfake amp\033[0m " + " ".join(args))
+    print("cwd " + os.getcwd())
+    if not sys.stdin.isatty():
+        piped = sys.stdin.read()
+        if piped:
+            print("first message: " + piped.strip())
+            log(["<stdin>", piped.strip()])
+    time.sleep(120)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

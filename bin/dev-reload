@@ -1,0 +1,19 @@
+#!/bin/bash
+# The owner's deploy: copy this checkout into Omarchy's plugin folder, where
+# the shell's inotify watcher sees the change and reloads the plugin. A
+# symlink into the checkout is not watched, so this copies. Agents test in
+# the omakit lab (tests/lab) and never run this on the desktop.
+PATH=/usr/bin
+unset BASH_ENV ENV
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+dest="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/plugins/io.github.mtolhuys.ampere"
+if [[ -L $dest ]]; then rm -- "$dest"; fi
+if [[ -d $dest/.git ]]; then
+  echo "dev-reload: $dest is a git checkout (installed with omarchy plugin add); leaving it alone" >&2
+  exit 1
+fi
+install -d -m 0755 "$dest"
+rsync -a --delete --exclude .git --exclude tests --exclude docs "$root/" "$dest/"
+echo "deployed $root -> $dest"
+echo "Omacale keeps a loaded bar widget's code; if the change does not show, run omarchy-restart-shell"

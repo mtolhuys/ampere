@@ -1,0 +1,641 @@
+#!/usr/bin/python3
+# Ampere's one helper: everything the panel asks of Amp or of the desktop goes
+# through here, started by omakit's Run block with a closed environment and a
+# deadline. Data commands print one JSON object on stdout; launch commands
+# hand their program to a new session and return at once.
+#
+#   ampere snapshot                     live + recent threads, merged
+#   ampere account                      plan, usage, credits, runners, version
+#   ampere search <query>               thread search
+#   ampere thread <action> <id> [arg]   archive | unarchive | rename | visibility | delete | markdown
+#   ampere open <url> [--webapp]        an ampcode.com page in the browser
+#   ampere continue <id> [dir]          resume a thread in a terminal
+#   ampere new <dir> [--mode m] [--fast] [--prompt text]
+#   ampere exec <dir> <prompt> [--mode m] [--fast] [--orb]
+#   ampere term <preset>                top | usage | update | login | account | doctor | config | skills | tools
+#   ampere copy <text>                  to the clipboard
+#   ampere notify <title> <body> [url]  desktop notification, Open opens url
+import json
+import os
+import re
+import selectors
+import shutil
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+sys.dont_write_bytecode = True
+
+HOME = os.environ.get("HOME", "")
+THREAD_ID = re.compile(r"^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+AMP_URL = re.compile(r"^https://ampcode\.com(/[A-Za-z0-9._~/%?&=#:+-]*)?$")
+MODES = ("low", "medium", "high", "ultra")
+VISIBILITIES = ("private", "unlisted", "workspace", "group")
+CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+MAX_PROMPT = 16000
+MAX_MARKDOWN = 4 * 1024 * 1024
+
+
+class Fail(Exception):
+    pass
+
+
+# ------------------------------------------------------------------ plumbing
+
+def emit(value):
+    sys.stdout.write(json.dumps(value, separators=(",", ":")))
+    sys.stdout.write("\n")
+
+
+def now_iso():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def find_amp():
+    override = os.environ.get("AMPERE_AMP", "").strip()
+    candidates = [override] if override else []
+    candidates += [
+        os.path.join(HOME, ".local/bin/amp"),
+        os.path.join(HOME, ".amp/bin/amp"),
+    ]
+    installs = os.path.join(HOME, ".local/share/mise/installs/amp")
+    try:
+        versions = sorted(
+            (v for v in os.listdir(installs) if v[:1].isdigit()),
+            key=lambda v: os.path.getmtime(os.path.join(installs, v)),
+            reverse=True,
+        )
+        candidates += [os.path.join(installs, v, "node_modules/.bin/amp") for v in versions]
+    except OSError:
+        pass
+    candidates += ["/usr/local/bin/amp", "/usr/bin/amp"]
+    for path in candidates:
+        if path and os.path.isabs(path) and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
+def omarchy_bin():
+    for root in (os.environ.get("AMPERE_OMARCHY_PATH", ""), os.path.join(HOME, ".local/share/omarchy"), "/usr/share/omarchy"):
+        if root and os.path.isdir(os.path.join(root, "bin")):
+            return os.path.join(root, "bin")
+    return "/usr/share/omarchy/bin"
+
+
+def launch_path():
+    parts = [
+        omarchy_bin(),
+        os.path.join(HOME, ".local/bin"),
+        os.path.join(HOME, ".local/share/mise/shims"),
+        "/usr/local/bin",
+        "/usr/bin",
+    ]
+    return ":".join(p for p in parts if p)
+
+
+def data_env(amp):
+    env = {
+        "HOME": HOME,
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "PATH": os.path.dirname(amp) + ":/usr/bin",
+        "NO_COLOR": "1",
+        "TERM": "dumb",
+    }
+    for key in ("XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"):
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    return env
+
+
+def desktop_env():
+    env = dict(os.environ)
+    env["PATH"] = launch_path()
+    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH"):
+        env.pop(key, None)
+    return env
+
+
+def run_amp(amp, args, timeout=20, cwd=None):
+    try:
+        done = subprocess.run(
+            [amp] + args, cwd=cwd or HOME, env=data_env(amp), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        raise Fail("amp " + " ".join(args[:2]) + " took longer than " + str(timeout) + "s")
+    if done.returncode != 0:
+        detail = clean(done.stderr or done.stdout).strip().splitlines()
+        raise Fail(detail[-1] if detail else "amp " + args[0] + " exited " + str(done.returncode))
+    return done.stdout
+
+
+def detach(argv, cwd=None, env=None):
+    subprocess.Popen(
+        argv, cwd=cwd or HOME, env=env or desktop_env(), start_new_session=True,
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def clean(text):
+    return CONTROL.sub("", re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text or ""))
+
+
+def local_dir(tree):
+    if not isinstance(tree, str) or not tree.startswith("file://"):
+        return ""
+    path = tree[len("file://"):]
+    try:
+        real = os.path.realpath(path)
+    except (OSError, ValueError):
+        return ""
+    return real if os.path.isdir(real) else ""
+
+
+def safe_dir(value):
+    path = os.path.realpath(os.path.expanduser(value or "")) if value else ""
+    if path and os.path.isdir(path) and (path == HOME or path.startswith(HOME + os.sep)):
+        return path
+    return HOME
+
+
+def need_thread(value):
+    if not THREAD_ID.match(value or ""):
+        raise Fail("not an Amp thread id")
+    return value
+
+
+def need_amp():
+    amp = find_amp()
+    if not amp:
+        raise Fail("amp-missing")
+    return amp
+
+
+# ------------------------------------------------------------------ parsing
+
+def number(text):
+    try:
+        return float(str(text).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_usage(text):
+    text = clean(text)
+    out = {
+        "signedIn": False, "user": "", "email": "", "tier": "",
+        "agent": None, "orb": None, "period": None, "credits": None, "lines": [],
+    }
+    m = re.search(r"Signed in as (\S+) \(([^)]+)\)", text)
+    if m:
+        out.update(signedIn=True, email=m.group(1), user=m.group(2))
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("**") and "How Usage" not in line:
+            out["lines"].append(re.sub(r"\*\*", "", re.sub(r"\s+-\s+https?://\S+$", "", line)))
+    m = re.search(r"\*\*([^*:]+):\*\*\s*agent usage \$([\d,.]+) of \$([\d,.]+) remaining \((\d+)%\)", text)
+    if m:
+        out["tier"] = m.group(1).strip()
+        out["agent"] = {"remaining": number(m.group(2)), "total": number(m.group(3)), "percent": int(m.group(4))}
+    m = re.search(r"orb usage ([\d,.]+)h of ([\d,.]+)h (\S+) orb hours remaining \((\d+)%\)", text)
+    if m:
+        out["orb"] = {"remaining": number(m.group(1)), "total": number(m.group(2)), "size": m.group(3), "percent": int(m.group(4))}
+    m = re.search(r"period (\d{4}-\d\d-\d\d) to (\d{4}-\d\d-\d\d)", text)
+    if m:
+        days = re.search(r"in (\d+) days?", text[m.end():m.end() + 120])
+        out["period"] = {"start": m.group(1), "end": m.group(2), "resetsInDays": int(days.group(1)) if days else None}
+    m = re.search(r"\*\*Individual credits:\*\*\s*\$([\d,.]+) remaining", text)
+    if m:
+        out["credits"] = number(m.group(1))
+    if not out["tier"]:
+        m = re.search(r"\*\*([^*:]+(?:Tier|Free|Plan)[^*:]*):\*\*", text)
+        if m:
+            out["tier"] = m.group(1).strip()
+    return out
+
+
+def parse_runners(text):
+    runners = []
+    for raw in clean(text).splitlines():
+        if not raw.strip():
+            continue
+        if raw[:1].isspace():
+            if runners:
+                runners[-1]["dirs"].append(expand(raw.strip()))
+            continue
+        parts = raw.split(None, 1)
+        runners.append({"name": parts[0], "dirs": [expand(parts[1].strip())] if len(parts) > 1 else []})
+    return runners
+
+
+def expand(path):
+    return HOME + path[1:] if path.startswith("~/") or path == "~" else path
+
+
+def blank_thread(tid):
+    return {
+        "id": tid, "title": "", "url": "https://ampcode.com/threads/" + tid, "updatedAt": "",
+        "messageCount": 0, "dir": "", "remote": False, "project": "", "status": "",
+        "working": False, "connected": False, "live": False,
+    }
+
+
+def valid_rows(rows):
+    return [r for r in rows or [] if isinstance(r, dict) and THREAD_ID.match(str(r.get("id", "")))]
+
+
+def from_listed(row):
+    """A row of `threads list` or `threads search`: where it ran, how long it is."""
+    entry = blank_thread(row["id"])
+    tree = row.get("tree")
+    entry.update(
+        title=clean(str(row.get("title") or "Untitled thread"))[:300],
+        updatedAt=str(row.get("updated") or row.get("updatedAt") or ""),
+        messageCount=row.get("messageCount") if isinstance(row.get("messageCount"), int) else 0,
+        dir=local_dir(tree),
+        remote=isinstance(tree, str) and not local_dir(tree),
+    )
+    return entry
+
+
+def with_live(entry, row):
+    """`amp top`'s view of the same thread: whether it is working right now."""
+    entry.update(
+        title=clean(str(row.get("title") or entry["title"] or "Untitled thread"))[:300],
+        updatedAt=str(row.get("updatedAt") or entry["updatedAt"]),
+        project=clean(str(row.get("project") or ""))[:120],
+        status=clean(str(row.get("status") or ""))[:40],
+        working=row.get("working") is True,
+        connected=row.get("executorConnected") is True,
+        live=True,
+    )
+
+
+def merge_threads(live, listed):
+    """Working threads first, then the rest newest first."""
+    by_id = {row["id"]: from_listed(row) for row in valid_rows(listed)}
+    for row in valid_rows(live):
+        with_live(by_id.setdefault(row["id"], blank_thread(row["id"])), row)
+    rows = list(by_id.values())
+    for row in rows:
+        if not row["project"] and row["dir"]:
+            row["project"] = os.path.basename(row["dir"])
+    rows.sort(key=lambda r: (not r["working"], -parse_time(r["updatedAt"])))
+    return rows
+
+
+def parse_time(value):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def recent_dirs(rows, runners):
+    seen = []
+    for row in rows:
+        if row.get("dir") and row["dir"] not in seen and row["dir"] != HOME:
+            seen.append(row["dir"])
+    for runner in runners or []:
+        for path in runner.get("dirs", []):
+            real = os.path.realpath(path)
+            if os.path.isdir(real) and real not in seen and real != HOME:
+                seen.append(real)
+    return seen[:12]
+
+
+# ------------------------------------------------------------------ data
+
+def json_lines(buffer):
+    """Complete JSON objects with a thread list, and what is left of the buffer."""
+    found = []
+    while b"\n" in buffer:
+        line, buffer = buffer.split(b"\n", 1)
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict) and isinstance(value.get("threads"), list):
+            found.append(value)
+    return found, buffer
+
+
+def top_stream(amp, wait=4.0, cap=4 * 1024 * 1024):
+    """One snapshot of `amp top`: it prints the empty initial state at once and
+    the real list about a second later, then only on change, so the second
+    line is the answer and the stream is ended there or at the deadline."""
+    try:
+        proc = subprocess.Popen(
+            [amp, "top", "--stream-jsonl"], cwd=HOME, env=data_env(amp),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise Fail(str(error))
+    sel = selectors.DefaultSelector()
+    sel.register(proc.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + wait
+    buffer, lines = b"", []
+    try:
+        while len(lines) < 2 and len(buffer) <= cap and sel.select(max(0.0, deadline - time.monotonic())):
+            chunk = os.read(proc.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            found, buffer = json_lines(buffer + chunk)
+            lines += found
+    finally:
+        proc.kill()
+        proc.wait()
+    return lines[-1] if lines else {"threads": [], "reconnecting": True}
+
+
+def cmd_snapshot(args):
+    amp = need_amp()
+    limit = 40
+    if args and args[0].isdigit():
+        limit = max(5, min(200, int(args[0])))
+    listed, error = [], ""
+    lister = subprocess.Popen(
+        [amp, "threads", "list", "--json", "--limit", str(limit)], cwd=HOME, env=data_env(amp),
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    live = top_stream(amp)
+    try:
+        out, err = lister.communicate(timeout=15)
+        if lister.returncode == 0:
+            parsed = json.loads(out or "[]")
+            listed = parsed if isinstance(parsed, list) else []
+        else:
+            error = (clean(err).strip().splitlines() or ["threads list failed"])[-1]
+    except (subprocess.TimeoutExpired, ValueError) as caught:
+        lister.kill()
+        error = "threads list: " + type(caught).__name__
+    rows = merge_threads(live.get("threads"), listed)
+    emit({
+        "ok": True,
+        "fetchedAt": now_iso(),
+        "reconnecting": live.get("reconnecting") is True,
+        "threads": rows,
+        "dirs": recent_dirs(rows, []),
+        "error": error,
+    })
+
+
+def cmd_account(args):
+    amp = need_amp()
+    usage = parse_usage(run_amp(amp, ["usage"], timeout=20))
+    try:
+        runners = parse_runners(run_amp(amp, ["runner", "list"], timeout=10))
+    except Fail:
+        runners = []
+    try:
+        version = clean(run_amp(amp, ["--version"], timeout=10)).strip().split(" ")[0]
+    except Fail:
+        version = ""
+    emit({
+        "ok": True, "fetchedAt": now_iso(), "amp": amp, "version": version,
+        "usage": usage, "runners": runners, "runnerDirs": recent_dirs([], runners),
+    })
+
+
+def cmd_search(args):
+    amp = need_amp()
+    query = clean(" ".join(args)).strip()[:200]
+    if not query:
+        emit({"ok": True, "query": "", "threads": []})
+        return
+    found = json.loads(run_amp(amp, ["threads", "search", "--json", "-n", "30", query], timeout=20) or "[]")
+    rows = merge_threads([], found if isinstance(found, list) else [])
+    emit({"ok": True, "query": query, "threads": rows})
+
+
+def cmd_thread(args):
+    if len(args) < 2:
+        raise Fail("thread needs an action and an id")
+    action, tid = args[0], need_thread(args[1])
+    amp = need_amp()
+    if action == "archive":
+        run_amp(amp, ["threads", "archive", tid])
+    elif action == "unarchive":
+        run_amp(amp, ["threads", "archive", "--unarchive", tid])
+    elif action == "rename":
+        name = clean(" ".join(args[2:])).strip()[:200]
+        if not name:
+            raise Fail("a thread needs a name")
+        run_amp(amp, ["threads", "rename", tid, name])
+    elif action == "visibility":
+        value = args[2] if len(args) > 2 else ""
+        if value not in VISIBILITIES:
+            raise Fail("visibility is one of " + ", ".join(VISIBILITIES))
+        run_amp(amp, ["threads", "share", tid, "--visibility", value])
+    elif action == "delete":
+        run_amp(amp, ["threads", "delete", tid])
+    elif action == "markdown":
+        text = run_amp(amp, ["threads", "markdown", tid], timeout=40)
+        data = text.encode("utf-8")[:MAX_MARKDOWN]
+        copy_bytes(data)
+        emit({"ok": True, "action": action, "id": tid, "bytes": len(data)})
+        return
+    else:
+        raise Fail("unknown thread action " + action)
+    emit({"ok": True, "action": action, "id": tid})
+
+
+# ------------------------------------------------------------------ desktop
+
+def copy_bytes(data):
+    copier = shutil.which("wl-copy", path="/usr/bin")
+    if not copier:
+        raise Fail("wl-copy is not installed")
+    # wl-copy forks a server that keeps the selection; it must outlive us.
+    proc = subprocess.Popen(
+        [copier], env=desktop_env(), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, start_new_session=True,
+    )
+    proc.communicate(data, timeout=10)
+
+
+def cmd_copy(args):
+    text = " ".join(args)[:MAX_MARKDOWN]
+    copy_bytes(text.encode("utf-8"))
+    emit({"ok": True})
+
+
+def cmd_open(args):
+    url = args[0] if args else ""
+    if not AMP_URL.match(url):
+        raise Fail("only ampcode.com pages open from here")
+    webapp = "--webapp" in args[1:]
+    launcher = os.path.join(omarchy_bin(), "omarchy-launch-webapp" if webapp else "omarchy-launch-browser")
+    if os.access(launcher, os.X_OK):
+        detach([launcher, url])
+    else:
+        detach(["/usr/bin/xdg-open", url])
+    emit({"ok": True})
+
+
+def terminal(argv, cwd, app_id="org.omarchy.agent"):
+    exec_terminal = shutil.which("xdg-terminal-exec", path="/usr/bin")
+    if not exec_terminal:
+        raise Fail("xdg-terminal-exec is not installed")
+    command = [exec_terminal, "--app-id=" + app_id, "--dir=" + cwd, "-e"] + argv
+    uwsm = shutil.which("uwsm-app", path="/usr/bin")
+    detach(([uwsm, "--"] if uwsm else []) + command, cwd=cwd)
+
+
+def flags(args):
+    mode, fast, orb, prompt, rest = "", False, False, "", []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--mode" and i + 1 < len(args):
+            mode = args[i + 1] if args[i + 1] in MODES else ""
+            i += 2
+            continue
+        if arg == "--prompt" and i + 1 < len(args):
+            prompt = args[i + 1]
+            i += 2
+            continue
+        if arg == "--fast":
+            fast = True
+        elif arg == "--orb":
+            orb = True
+        else:
+            rest.append(arg)
+        i += 1
+    extra = (["-m", mode] if mode else []) + (["--fast"] if fast else [])
+    return extra, orb, prompt.strip()[:MAX_PROMPT], rest
+
+
+def cmd_continue(args):
+    tid = need_thread(args[0] if args else "")
+    amp = need_amp()
+    terminal([amp, "threads", "continue", tid], safe_dir(args[1] if len(args) > 1 else ""))
+    emit({"ok": True})
+
+
+def cmd_new(args):
+    amp = need_amp()
+    extra, _, prompt, rest = flags(args)
+    cwd = safe_dir(rest[0] if rest else "")
+    if prompt:
+        # Amp takes the first interactive message from piped input, as
+        # omarchy-agent seeds it; the binary rides in as $0.
+        argv = ["/usr/bin/bash", "-c", 'p=$1; shift; printf "%s\\n" "$p" | exec "$0" "$@"', amp, prompt] + extra
+    else:
+        argv = [amp] + extra
+    terminal(argv, cwd)
+    emit({"ok": True, "dir": cwd})
+
+
+def cmd_exec(args):
+    amp = need_amp()
+    extra, orb, _, rest = flags(args)
+    if len(rest) < 2:
+        raise Fail("exec needs a directory and a prompt")
+    cwd = safe_dir(rest[0])
+    prompt = clean(" ".join(rest[1:])).strip()[:MAX_PROMPT]
+    if not prompt:
+        raise Fail("an empty prompt")
+    argv = [amp, "-x", prompt] + extra + (["-ox"] if orb else [])
+    runner = shutil.which("systemd-run", path="/usr/bin")
+    if runner:
+        unit = "ampere-" + str(int(time.time() * 1000))
+        detach([runner, "--user", "--collect", "--quiet", "--unit=" + unit,
+                "--working-directory=" + cwd, "--"] + argv, cwd=cwd)
+    else:
+        detach(argv, cwd=cwd)
+    emit({"ok": True, "dir": cwd, "orb": orb})
+
+
+PRESETS = {
+    "top": (["top"], False),
+    "usage": (["usage", "--details"], True),
+    "update": (["update"], True),
+    "login": (["login"], True),
+    "account": (["account", "switch"], True),
+    "doctor": (["mcp", "doctor"], True),
+    "config": (["config", "edit"], False),
+    "skills": (["skill", "list"], True),
+    "tools": (["tools", "list"], True),
+    "plugins": (["plugins", "list"], True),
+    "providers": (["config", "model-providers", "list"], True),
+}
+
+
+def cmd_term(args):
+    preset = args[0] if args else ""
+    if preset not in PRESETS:
+        raise Fail("unknown preset")
+    amp = need_amp()
+    argv, hold = PRESETS[preset]
+    command = [amp] + argv
+    if hold:
+        # A report closes with its terminal; keep it until a key is pressed.
+        command = ["/usr/bin/bash", "-c", '"$0" "$@"; printf "\\n\\033[2mpress any key to close\\033[0m"; read -rsn1', amp] + argv
+    terminal(command, HOME, app_id="org.omarchy.ampere")
+    emit({"ok": True})
+
+
+def cmd_notify(args):
+    if len(args) < 2:
+        raise Fail("notify needs a title and a body")
+    title, body = clean(args[0])[:200], clean(args[1])[:400]
+    url = args[2] if len(args) > 2 and AMP_URL.match(args[2]) else ""
+    icon = os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))), "assets", "ampere.svg")
+    detach([sys.executable, "-I", "-S", os.path.realpath(__file__), "_notify-wait", title, body, url, icon])
+    emit({"ok": True})
+
+
+def notify_wait(args):
+    title, body, url, icon = (args + ["", "", "", ""])[:4]
+    sender = shutil.which("notify-send", path="/usr/bin")
+    if not sender:
+        return
+    argv = [sender, "-a", "Ampere", "-i", icon if os.path.isfile(icon) else "dialog-information"]
+    if url:
+        argv += ["--action=default=Open", "--action=open=Open thread", "--wait"]
+    argv += [title, body]
+    try:
+        done = subprocess.run(argv, env=desktop_env(), capture_output=True, text=True, timeout=3600)
+    except subprocess.TimeoutExpired:
+        return
+    if url and done.stdout.strip() in ("default", "open"):
+        cmd_open([url])
+
+
+COMMANDS = {
+    "snapshot": cmd_snapshot,
+    "account": cmd_account,
+    "search": cmd_search,
+    "thread": cmd_thread,
+    "open": cmd_open,
+    "continue": cmd_continue,
+    "new": cmd_new,
+    "exec": cmd_exec,
+    "term": cmd_term,
+    "copy": cmd_copy,
+    "notify": cmd_notify,
+}
+
+
+def main(argv):
+    if len(argv) > 1 and argv[1] == "_notify-wait":
+        notify_wait(argv[2:])
+        return 0
+    if len(argv) < 2 or argv[1] not in COMMANDS:
+        emit({"ok": False, "error": "usage: ampere " + " | ".join(COMMANDS)})
+        return 2
+    try:
+        COMMANDS[argv[1]](argv[2:])
+    except Fail as error:
+        emit({"ok": False, "error": str(error)})
+        return 1
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        emit({"ok": False, "error": type(error).__name__ + ": " + str(error)[:300]})
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

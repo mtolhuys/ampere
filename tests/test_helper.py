@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -108,10 +109,9 @@ class Guards(unittest.TestCase):
         self.assertEqual(ampere.safe_dir(""), ampere.HOME)
 
     def test_flags(self):
-        extra, orb, prompt, rest = ampere.flags(["/d", "--mode", "high", "--fast", "--orb", "--prompt", " hi "])
+        extra, orb, rest = ampere.flags(["/d", "--mode", "high", "--fast", "--orb"])
         self.assertEqual(extra, ["-m", "high", "--fast"])
         self.assertTrue(orb)
-        self.assertEqual(prompt, "hi")
         self.assertEqual(rest, ["/d"])
         self.assertEqual(ampere.flags(["--mode", "rm -rf"])[0], [])
 
@@ -129,6 +129,84 @@ class SessionPath(unittest.TestCase):
                 os.environ["AMPERE_SESSION_PATH"] = old
         self.assertEqual(env["PATH"], "/a/bin:/usr/bin")
         self.assertNotIn("AMPERE_SESSION_PATH", env)
+
+
+SECRET = "rotate the staging key, it is hunter2"
+
+
+class PromptPrivacy(unittest.TestCase):
+    """A prompt reaches Amp through stdin or a private file, never an argv."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.runtime = tempfile.mkdtemp()
+        os.chmod(self.runtime, 0o700)
+
+    def test_exec_pipes_the_prompt(self):
+        amp = os.path.join(self.home, "amp")
+        with open(amp, "w") as f:
+            f.write('#!/usr/bin/bash\nprintf "%s\\n" "$@" > "$HOME/argv.tmp"; cat > "$HOME/stdin"; mv "$HOME/argv.tmp" "$HOME/argv"\n')
+        os.chmod(amp, 0o755)
+        env = {"PATH": "/usr/bin", "HOME": self.home, "LANG": "C.UTF-8", "AMPERE_AMP": amp, "AMPERE_PROMPT": SECRET}
+        done = subprocess.run([HELPER, "exec", self.home, "--mode", "high"], capture_output=True, text=True, env=env, timeout=20)
+        self.assertEqual(json.loads(done.stdout)["ok"], True, done.stdout + done.stderr)
+        argv_file = os.path.join(self.home, "argv")
+        for _ in range(100):
+            if os.path.exists(argv_file):
+                break
+            time.sleep(0.05)
+        with open(argv_file) as f:
+            argv = f.read().split("\n")
+        self.assertEqual(argv[:3], ["-x", "-m", "high"])
+        self.assertNotIn(SECRET, " ".join(argv))
+        with open(os.path.join(self.home, "stdin")) as f:
+            self.assertEqual(f.read(), SECRET)
+
+    def test_exec_refuses_an_empty_prompt(self):
+        env = {"PATH": "/usr/bin", "HOME": self.home, "LANG": "C.UTF-8", "AMPERE_AMP": "/usr/bin/true"}
+        done = subprocess.run([HELPER, "exec", self.home], capture_output=True, text=True, env=env, timeout=20)
+        self.assertEqual(json.loads(done.stdout)["error"], "an empty prompt")
+
+    def test_new_hands_a_private_file_to_the_terminal(self):
+        seen = []
+        saved = (ampere.terminal, ampere.need_amp, ampere.emit, dict(os.environ))
+        ampere.terminal = lambda argv, cwd, **kw: seen.append(argv)
+        ampere.need_amp = lambda: "/usr/bin/amp"
+        ampere.emit = lambda value: None
+        os.environ.update(AMPERE_PROMPT=SECRET, XDG_RUNTIME_DIR=self.runtime)
+        try:
+            ampere.cmd_new([ampere.HOME])
+        finally:
+            ampere.terminal, ampere.need_amp, ampere.emit = saved[:3]
+            os.environ.clear()
+            os.environ.update(saved[3])
+        argv = seen[0]
+        self.assertNotIn(SECRET, " ".join(argv))
+        path = argv[4]
+        folder = os.path.dirname(path)
+        self.assertEqual(oct(os.stat(folder).st_mode & 0o777), "0o700")
+        self.assertEqual(oct(os.stat(path).st_mode & 0o777), "0o600")
+        with open(path) as f:
+            self.assertEqual(f.read(), SECRET + "\n")
+        # What the terminal runs: the prompt piped into amp, the file gone.
+        out = subprocess.run(argv[:3] + ["/usr/bin/cat", path], capture_output=True, text=True, timeout=10)
+        self.assertEqual(out.stdout, SECRET + "\n")
+        self.assertFalse(os.path.exists(path))
+
+    def test_private_dir_refuses_a_shared_one(self):
+        folder = os.path.join(self.runtime, "io.github.mtolhuys.ampere")
+        os.mkdir(folder, 0o755)
+        os.chmod(folder, 0o755)
+        saved = os.environ.get("XDG_RUNTIME_DIR")
+        os.environ["XDG_RUNTIME_DIR"] = self.runtime
+        try:
+            with self.assertRaises(ampere.Fail):
+                ampere.private_dir()
+        finally:
+            if saved is None:
+                del os.environ["XDG_RUNTIME_DIR"]
+            else:
+                os.environ["XDG_RUNTIME_DIR"] = saved
 
 
 class Cli(unittest.TestCase):

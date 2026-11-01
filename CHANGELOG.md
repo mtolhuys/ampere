@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.0
+
+- Notifications you can tune: a minimum turn length (30 s by default, so
+  quick turns stay quiet), quiet hours, and nothing while the panel is open.
+- A bell in the panel header (`b`) cycles on, snoozed for an hour, off.
+- Mute a single thread's notifications from its row (`q`).
+- IPC: notifications, snooze <minutes>, mute, unmute.
+- Ask Amp prompts never appear in a process's command line: the helper gets
+  them in its environment, background and orb asks pipe them into `amp -x` on
+  stdin, and a terminal ask reads them from a 0600 file in the runtime
+  directory that it deletes before it starts Amp.
+
 ## 0.1.0
 
 First release.

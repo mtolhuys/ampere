@@ -10,8 +10,8 @@
 #   ampere thread <action> <id> [arg]   archive | unarchive | rename | visibility | delete | markdown
 #   ampere open <url> [--webapp]        an ampcode.com page in the browser
 #   ampere continue <id> [dir]          resume a thread in a terminal
-#   ampere new <dir> [--mode m] [--fast] [--prompt text]
-#   ampere exec <dir> <prompt> [--mode m] [--fast] [--orb]
+#   ampere new <dir> [--mode m] [--fast]           first message from $AMPERE_PROMPT
+#   ampere exec <dir> [--mode m] [--fast] [--orb]  the prompt from $AMPERE_PROMPT
 #   ampere term <preset>                top | usage | update | login | account | doctor | config | skills | tools
 #   ampere copy <text>                  to the clipboard
 #   ampere notify <title> <body> [url]  desktop notification, Open opens url
@@ -20,8 +20,10 @@ import os
 import re
 import selectors
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -111,7 +113,7 @@ def data_env(amp):
 def desktop_env():
     env = dict(os.environ)
     env["PATH"] = launch_path()
-    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH", "AMPERE_SESSION_PATH"):
+    for key in ("AMPERE_AMP", "AMPERE_OMARCHY_PATH", "AMPERE_SESSION_PATH", "AMPERE_PROMPT"):
         env.pop(key, None)
     return env
 
@@ -142,11 +144,63 @@ def run_amp(amp, args, timeout=20, cwd=None):
     return done.stdout
 
 
-def detach(argv, cwd=None, env=None):
-    subprocess.Popen(
+def detach(argv, cwd=None, env=None, stdin_text=None):
+    proc = subprocess.Popen(
         argv, cwd=cwd or HOME, env=env or desktop_env(), start_new_session=True,
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
+    if stdin_text is not None:
+        try:
+            proc.stdin.write(stdin_text.encode())
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+
+
+# ------------------------------------------------------------------ prompts
+# A prompt is private text: it never rides in an argv, where other local
+# accounts can read it in /proc. The panel hands it over in the environment,
+# which only this account can read, and it goes on through stdin or a 0600
+# file in this account's runtime directory.
+
+def prompt_from_env():
+    return clean(os.environ.get("AMPERE_PROMPT", "")).strip()[:MAX_PROMPT]
+
+
+def private_dir():
+    """$XDG_RUNTIME_DIR/<plugin id>, 0700, ours: where a prompt waits for its terminal."""
+    base = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not base.startswith("/"):
+        raise Fail("no XDG_RUNTIME_DIR to hand the prompt over in")
+    path = os.path.join(base, "io.github.mtolhuys.ampere")
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise Fail("%s is not a private directory of this account" % path)
+    return path
+
+
+def prompt_file(prompt):
+    """A 0600 file holding the prompt; the terminal reads and removes it. One
+    a terminal never read is gone after a day, or at logout with the runtime
+    directory."""
+    folder = private_dir()
+    cutoff = time.time() - 86400
+    for name in os.listdir(folder):
+        old = os.path.join(folder, name)
+        try:
+            if name.startswith("ask-") and os.lstat(old).st_mtime < cutoff:
+                os.unlink(old)
+        except OSError:
+            pass
+    fd, path = tempfile.mkstemp(prefix="ask-", dir=folder)
+    with os.fdopen(fd, "w") as f:
+        f.write(prompt + "\n")
+    return path
 
 
 def clean(text):
@@ -496,16 +550,12 @@ def terminal(argv, cwd, app_id="org.omarchy.agent"):
 
 
 def flags(args):
-    mode, fast, orb, prompt, rest = "", False, False, "", []
+    mode, fast, orb, rest = "", False, False, []
     i = 0
     while i < len(args):
         arg = args[i]
         if arg == "--mode" and i + 1 < len(args):
             mode = args[i + 1] if args[i + 1] in MODES else ""
-            i += 2
-            continue
-        if arg == "--prompt" and i + 1 < len(args):
-            prompt = args[i + 1]
             i += 2
             continue
         if arg == "--fast":
@@ -516,7 +566,7 @@ def flags(args):
             rest.append(arg)
         i += 1
     extra = (["-m", mode] if mode else []) + (["--fast"] if fast else [])
-    return extra, orb, prompt.strip()[:MAX_PROMPT], rest
+    return extra, orb, rest
 
 
 def cmd_continue(args):
@@ -528,12 +578,16 @@ def cmd_continue(args):
 
 def cmd_new(args):
     amp = need_amp()
-    extra, _, prompt, rest = flags(args)
+    extra, _, rest = flags(args)
     cwd = safe_dir(rest[0] if rest else "")
+    prompt = prompt_from_env()
     if prompt:
         # Amp takes the first interactive message from piped input, as
-        # omarchy-agent seeds it; the binary rides in as $0.
-        argv = ["/usr/bin/bash", "-c", 'p=$1; shift; printf "%s\\n" "$p" | exec "$0" "$@"', amp, prompt] + extra
+        # omarchy-agent seeds it. The prompt waits in a private file the
+        # terminal reads and removes; printf is a builtin, so it is in no
+        # argv on the way. The binary rides in as $0.
+        script = 'f=$1; shift; p=$(<"$f"); rm -f -- "$f"; printf "%s\\n" "$p" | exec "$0" "$@"'
+        argv = ["/usr/bin/bash", "-c", script, amp, prompt_file(prompt)] + extra
     else:
         argv = [amp] + extra
     terminal(argv, cwd)
@@ -542,16 +596,17 @@ def cmd_new(args):
 
 def cmd_exec(args):
     amp = need_amp()
-    extra, orb, _, rest = flags(args)
-    if len(rest) < 2:
-        raise Fail("exec needs a directory and a prompt")
+    extra, orb, rest = flags(args)
+    if not rest:
+        raise Fail("exec needs a directory")
     cwd = safe_dir(rest[0])
-    prompt = clean(" ".join(rest[1:])).strip()[:MAX_PROMPT]
+    prompt = prompt_from_env()
     if not prompt:
         raise Fail("an empty prompt")
     # In a session of its own, like every launch here: it outlives this
-    # helper's run and a shell restart, which stops Quickshell alone.
-    detach([amp, "-x", prompt] + extra + (["-ox"] if orb else []), cwd=cwd, env=session_env())
+    # helper's run and a shell restart, which stops Quickshell alone. Amp
+    # reads an execute prompt from stdin.
+    detach([amp, "-x"] + extra + (["-ox"] if orb else []), cwd=cwd, env=session_env(), stdin_text=prompt)
     emit({"ok": True, "dir": cwd, "orb": orb})
 
 

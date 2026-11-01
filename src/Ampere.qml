@@ -35,6 +35,8 @@ Panel {
   readonly property int activeSeconds: Math.max(4, Number(setting("pollActiveSec", 8)))
   readonly property int previewCount: Math.max(3, Math.min(20, Number(setting("threadCount", 6))))
   readonly property bool notifyOnFinish: setting("notifyOnFinish", true) === true
+  readonly property int notifyMinSeconds: Math.max(0, Math.min(3600, Number(setting("notifyMinTurnSec", 30)) || 0))
+  readonly property string quietHours: String(setting("notifyQuietHours", "") || "")
   readonly property bool webApp: setting("linkBehavior", "Browser tab") === "Web app window"
   readonly property bool showUsage: setting("showUsage", true) === true
 
@@ -118,6 +120,17 @@ Panel {
 
   property string toast: ""
   property bool toastUrgent: false
+
+  // ------------------------------------------------------------ notifications
+  // muteUntil: 0 on, -1 off until turned back on, else a snooze's end in ms.
+  property double muteUntil: 0
+  property var mutedThreads: []
+  // When each working thread started its turn, as the polls saw it.
+  property var turnStarts: ({})
+  readonly property string bell: !notifyOnFinish ? "settings" : Model.muteState(muteUntil, now)
+  readonly property string bellText: bell === "settings" ? "Notifications are off in Ampere's settings"
+    : (bell === "off" ? "Notifications off"
+      : (bell === "snoozed" ? "Snoozed until " + Qt.formatTime(new Date(muteUntil), "HH:mm") : "Notifications on"))
 
   // ------------------------------------------------------------ lifecycle
 
@@ -238,7 +251,9 @@ Panel {
         version: { type: "integer", minimum: 1, maximum: 1 },
         dir: { type: "string", maxLength: 4096 },
         mode: { type: "string", enum: ["", "low", "medium", "high", "ultra"] },
-        fast: { type: "boolean" }
+        fast: { type: "boolean" },
+        muteUntil: { type: "number", minimum: -1 },
+        mutedThreads: { type: "array", maxItems: 200, items: { type: "string", pattern: "^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } }
       }
     })
     onFinished: result => {
@@ -246,11 +261,13 @@ Panel {
       root.askDir = result.value.dir || ""
       root.mode = result.value.mode || ""
       root.fast = result.value.fast === true
+      root.muteUntil = Number(result.value.muteUntil || 0)
+      root.mutedThreads = result.value.mutedThreads || []
     }
   }
 
   function remember() {
-    memory.write({ version: 1, dir: askDir, mode: mode, fast: fast })
+    memory.write({ version: 1, dir: askDir, mode: mode, fast: fast, muteUntil: muteUntil, mutedThreads: mutedThreads })
   }
 
   // ------------------------------------------------------------ timers
@@ -345,14 +362,50 @@ Panel {
     ampMissing = false
     snapshotError = data.error || ""
     share({ threads: threads, dirs: dirs, fetchedAt: fetchedAt, hasSnapshot: true, ampMissing: false, snapshotError: snapshotError })
-    if (hadSnapshot && notifyOnFinish && isLeader()) {
-      // One notification per poll: a second start() on the same Run would
-      // cancel the first before it was sent.
-      var done = Model.finished(before, threads)
-      if (done.length === 1) notify("Amp finished a turn", done[0].title, done[0].url)
-      else if (done.length > 1)
-        notify("Amp finished " + done.length + " turns", done.map(function(r) { return r.title }).join("  ·  "), "https://ampcode.com/")
-    }
+    var starts = turnStarts
+    turnStarts = Model.turnStarts(starts, threads, fetchedAt)
+    if (hadSnapshot && isLeader()) notifyFinished(Model.finished(before, threads), starts)
+  }
+
+  // One notification per poll: a second start() on the same Run would
+  // cancel the first before it was sent. Nothing while the panel is open,
+  // where the row says it already.
+  function notifyFinished(done, starts) {
+    if (done.length === 0 || !notifyOnFinish || anyOpen()) return
+    if (Model.muteState(muteUntil, Date.now()) !== "on") return
+    if (Model.inQuietHours(quietHours, new Date())) return
+    done = Model.notifiable(done, starts, Date.now(), notifyMinSeconds, mutedThreads)
+    if (done.length === 1) notify("Amp finished a turn", done[0].title, done[0].url)
+    else if (done.length > 1)
+      notify("Amp finished " + done.length + " turns", done.map(function(r) { return r.title }).join("  ·  "), "https://ampcode.com/")
+  }
+
+  function anyOpen() {
+    var list = peers()
+    for (var i = 0; list && i < list.length; i++) if (list[i] && list[i].opened) return true
+    return false
+  }
+
+  function setMute(until) {
+    now = Date.now()
+    muteUntil = until
+    share({ muteUntil: muteUntil })
+    remember()
+  }
+
+  function cycleBell() {
+    if (!notifyOnFinish) { say(bellText, true); return }
+    setMute(Model.nextMute(muteUntil, Date.now()))
+    say(bellText, false)
+  }
+
+  function toggleThreadMute(row) {
+    var muted = mutedThreads.indexOf(row.id) >= 0
+    mutedThreads = muted ? mutedThreads.filter(function(id) { return id !== row.id })
+                         : [row.id].concat(mutedThreads).slice(0, 200)
+    share({ mutedThreads: mutedThreads })
+    remember()
+    say(muted ? "This thread notifies again" : "This thread no longer notifies", false)
   }
 
   function applyAccount(result) {
@@ -387,8 +440,11 @@ Panel {
     toastTimer.restart()
   }
 
-  function launch(args, doneText) {
+  // A prompt is private text: it goes to the helper in the environment,
+  // which only this account can read, never in the command line.
+  function launch(args, doneText, prompt) {
     launchRun.done = doneText || ""
+    launchRun.environment = prompt ? Object.assign({}, helperEnv, { AMPERE_PROMPT: String(prompt).slice(0, 16000) }) : helperEnv
     launchRun.command = [helper].concat(args)
     launchRun.start()
   }
@@ -421,6 +477,7 @@ Panel {
     else if (name === "markdown") runAction("markdown", row)
     else if (name === "rename") { renamingId = row.id; confirmId = "" }
     else if (name === "archive") runAction("archive", row)
+    else if (name === "mute") toggleThreadMute(row)
     else if (name === "delete") {
       if (confirmId === row.id) { confirmId = ""; runAction("delete", row) }
       else { confirmId = row.id; confirmTimer.restart() }
@@ -464,14 +521,14 @@ Panel {
     var dir = askDir || (askDirOptions.length ? askDirOptions[0] : home)
     var extra = (mode ? ["--mode", mode] : []).concat(fast ? ["--fast"] : [])
     if (route === "terminal") {
-      launch(["new", dir].concat(extra).concat(text ? ["--prompt", text] : []), "")
+      launch(["new", dir].concat(extra), "", text)
       askText = ""
       close()
       return
     }
     if (!text) { say("Write what Amp should do first", true); return }
-    launch(["exec", dir, text].concat(extra).concat(route === "orb" ? ["--orb"] : []),
-           route === "orb" ? "Sent to an orb, it will show up above" : "Amp is on it in the background")
+    launch(["exec", dir].concat(extra).concat(route === "orb" ? ["--orb"] : []),
+           route === "orb" ? "Sent to an orb, it will show up above" : "Amp is on it in the background", text)
     askText = ""
     keyFocus()
     // The new thread appears in Amp's list a moment later.
@@ -533,6 +590,8 @@ Panel {
     else if (t === "m") keyAction("markdown")
     else if (t === "e") keyAction("rename")
     else if (t === "a") keyAction("archive")
+    else if (t === "q") keyAction("mute")
+    else if (t === "b") cycleBell()
     else if (t === "t") terminalPreset("top")
     else if (t === "u") terminalPreset("usage")
     else if (t === "d") openUrl("https://ampcode.com/")
@@ -559,6 +618,14 @@ Panel {
     function resume(): void { if (root.threads.length) root.continueThread(root.threads[0]) }
     function top(): void { root.terminalPreset("top") }
     function working(): string { return String(root.workingCount) }
+    function notifications(): string { root.now = Date.now(); return root.bell }
+    function mute(): string { root.setMute(-1); return root.bell }
+    function unmute(): string { root.setMute(0); return root.bell }
+    function snooze(minutes: string): string {
+      var m = Math.max(1, Math.min(1440, Number(minutes) || 60))
+      root.setMute(Date.now() + m * 60000)
+      return root.bell
+    }
   }
 
   // ------------------------------------------------------------ bar icon
@@ -731,6 +798,14 @@ Panel {
             trailingControl: Component {
               Row {
                 spacing: Style.space(2)
+                PanelActionButton {
+                  iconText: root.bell === "on" ? "󰂚" : (root.bell === "snoozed" ? "󰂟" : "󰂛")
+                  tooltipText: root.bellText + "  (b)"
+                  foreground: root.bell === "on" ? root.foreground : (root.bell === "snoozed" ? hues.yellow : Util.alpha(root.foreground, 0.45))
+                  hoverColor: root.accent
+                  fontFamily: root.fontFamily
+                  onClicked: root.cycleBell()
+                }
                 PanelActionButton {
                   iconText: "󰐕"
                   tooltipText: "New thread in a terminal"
@@ -1004,6 +1079,7 @@ Panel {
                 renaming: root.renamingId === modelData.id
                 confirming: root.confirmId === modelData.id
                 busy: root.busyId === modelData.id
+                muted: root.mutedThreads.indexOf(modelData.id) >= 0
                 animate: root.opened
                 tint: root.voiceFor(modelData)
                 projectColor: hues.hueFor(modelData.project)

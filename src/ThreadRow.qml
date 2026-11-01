@@ -15,6 +15,7 @@ CursorSurface {
   property bool renaming: false
   property bool confirming: false
   property bool busy: false
+  property bool muted: false
   property bool animate: true
   property color urgent: Commons.Color.urgent
   // The thread's voice on the scope while it works, and its project's hue.
@@ -175,7 +176,7 @@ CursorSurface {
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
       visible: !actions.visible && !root.renaming
-      text: root.busy ? "…" : (root.thread.working ? "live" : Model.ago(root.thread.updatedAt, root.now))
+      text: (root.muted ? "󰂛  " : "") + (root.busy ? "…" : (root.thread.working ? "live" : Model.ago(root.thread.updatedAt, root.now)))
       color: root.thread.working ? root.tint : Util.alpha(root.foreground, 0.42)
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -197,7 +198,8 @@ CursorSurface {
           { name: "open", glyph: "󰖟", tip: "Open on ampcode.com  (Enter)" },
           { name: "copy", glyph: "󰆏", tip: "Copy link  (y)" },
           { name: "rename", glyph: "󰏫", tip: "Rename  (e)" },
-          { name: "archive", glyph: "󰀼", tip: "Archive  (a)" }
+          { name: "archive", glyph: "󰀼", tip: "Archive  (a)" },
+          { name: "mute", glyph: root.muted ? "󰂚" : "󰂛", tip: root.muted ? "Notify for this thread again  (q)" : "No notifications for this thread  (q)" }
         ]
 
         PanelActionButton {

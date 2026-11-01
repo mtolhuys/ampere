@@ -36,11 +36,16 @@ omakit_lab_suite() {
   # Polls until the command succeeds, for at most $1 seconds.
   within() { local limit="$1"; shift; local end=$((SECONDS + limit)); until "$@" >/dev/null 2>&1; do ((SECONDS >= end)) && return 1; sleep 1; done; }
   called() { ssh_guest "jq -c .argv \$HOME/.fake-amp/calls.log" | grep -F -- "$1"; }
-  called_in() { ssh_guest "jq -c 'select(.argv | index(\"-x\")) | .cwd' \$HOME/.fake-amp/calls.log" | grep -F -- "$1"; }
+  called_in() { ssh_guest "jq -c 'select(.argv[0] == \"<stdin-x>\") | .cwd' \$HOME/.fake-amp/calls.log" | grep -F -- "$1"; }
+  # Whether any process's command line in the guest holds the text; the text
+  # goes over base64, so the check's own command line does not.
+  argv_has() { ssh_guest "python3 /tmp/argv_has.py $(printf %s "$1" | base64 -w0)"; }
+  not_in_argv() { ! argv_has "$1"; }
   clipboard_is() { [[ $(ssh_session "wl-paste -n" 2>/dev/null) == "$1" ]]; }
   panel_open() { ssh_session "hyprctl -j layers | jq -e '[.. | objects | select(.namespace? == \"omarchy-keyboard-panel\")] | length > 0'"; }
   panel_closed() { ! panel_open; }
   working_is() { [[ $(ipc working) == "$1" ]]; }
+  bell_is_after() { [[ $(ipc "$1") == "$2" ]]; }
   shot() { capture_console "$1"; note "screenshot $1.png"; }
   # Close the terminals Ampere opened, by their app id, without a dispatcher.
   close_terminals() { ssh_session "hyprctl -j clients | jq -r '.[] | select(.class | test(\"^org\\\\.omarchy\\\\.(agent|ampere)\")) | .pid' | xargs -r kill" >/dev/null 2>&1 || true; }
@@ -66,6 +71,19 @@ omakit_lab_suite() {
   log "Placing the fixture Amp CLI and its threads"
   ssh_guest "mkdir -p \$HOME/.local/bin \$HOME/.fake-amp \$HOME/work/atlas \$HOME/work/beacon && rm -f \$HOME/.fake-amp/calls.log" || return 1
   ssh_guest "cat > \$HOME/.local/bin/amp && chmod +x \$HOME/.local/bin/amp" < "$here/fake-amp" || return 1
+  ssh_guest "cat > /tmp/argv_has.py" <<'PY' || return 1
+import base64, glob, sys
+needle = base64.b64decode(sys.argv[1])
+for path in glob.glob("/proc/[0-9]*/cmdline"):
+    try:
+        with open(path, "rb") as f:
+            if needle in f.read():
+                print(path)
+                sys.exit(0)
+    except OSError:
+        pass
+sys.exit(1)
+PY
   local home
   home=$(ssh_guest 'printf %s "$HOME"')
   python3 - "$home" > "$RUN_DIR/fixture-state.json" <<'PY' || return 1
@@ -197,13 +215,15 @@ PY
     qmp press n; sleep 0.5; qmp type "Write the changelog"; sleep 0.3
     shot ask
     qmp press ctrl-ret
-    check ask "Ctrl+Enter runs amp -x in the background" within 15 called '["-x","Write the changelog"]'
+    check ask "Ctrl+Enter runs amp -x in the background, the prompt on stdin" within 15 called '["<stdin-x>","Write the changelog"]'
     check ask "it runs in the chosen directory" called_in "/work/atlas"
     sleep 4
     shot ask-started
     qmp press n; sleep 0.5; qmp type "Hello from the lab"; qmp press ret
     check ask "Enter opens Amp in a terminal with the message piped in" within 20 called '["<stdin>","Hello from the lab"]'
     check ask "the panel closes when a terminal opens" within 6 panel_closed
+    check private "the first message is in no process's command line" not_in_argv "Hello from the lab"
+    check private "and its handover file is gone" ssh_session '! ls "$XDG_RUNTIME_DIR"/io.github.mtolhuys.ampere/ask-* 2>/dev/null | grep -q .'
     sleep 2
     shot terminal
     close_terminals
@@ -216,15 +236,92 @@ PY
     sleep 1
     shot notification
 
+    log "Notifications on the person's terms"
+    # Four threads of its own, newest first, so earlier scenarios (archive,
+    # delete) cannot have moved them; nothing else working.
+    local muted_t long_t short_t snoozed_t
+    muted_t="Muted: format the whole repo"; long_t="Long: port the importer"
+    short_t="Short: what does this flag do"; snoozed_t="Snoozed: nightly cleanup"
+    # The fixture's state, edited here with jq and written back.
+    edit_state() {
+      local f="$RUN_DIR/state-edit.json"
+      ssh_guest 'cat $HOME/.fake-amp/state.json' > "$f" && jq "$@" "$f" > "$f.new" && ssh_guest 'cat > $HOME/.fake-amp/state.json' < "$f.new"
+    }
+    nid() { printf 'T-01a1aa2%s-5e8b-77ce-80b8-f242bd33c52%s' "$1" "$1"; }
+    edit_state --arg now "$(date -u +%Y-%m-%dT%H:%M:%S)" --arg t0 "$muted_t" --arg t1 "$long_t" --arg t2 "$short_t" --arg t3 "$snoozed_t" '
+      (.threads[] | .working) = false
+      | .threads += [range(0; 4) as $i | {
+          id: ("T-01a1aa2\($i)-5e8b-77ce-80b8-f242bd33c52\($i)"),
+          title: ([$t0, $t1, $t2, $t3][$i]),
+          updated: ($now + ".00\(9 - $i)Z"),
+          working: false, connected: false, project: "atlas", tree: "", messageCount: 2}]'
+    # Thread i of those four working or not, then a poll right away.
+    set_working() { edit_state --arg id "$(nid "$1")" --argjson on "$2" '(.threads[] | select(.id == $id)) |= (.working = $on | .connected = $on)'; ipc refresh >/dev/null; }
+    notified() { ssh_guest "grep -q -F '$1' /tmp/ampere-notify.log"; }
+    not_notified() { ! notified "$1"; }
+    memory_has() { ssh_guest "jq -e '$1' \$HOME/.local/state/$AMPERE_ID/memory.json"; }
+    bell_is() { [[ $(ipc notifications) == "$1" ]]; }
+    ipc refresh >/dev/null
+    check notify "the four threads are in, none working" within 20 working_is 0
+
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 1.5
+    qmp press j; sleep 0.3; qmp press q
+    check mute "q mutes the thread under the cursor" within 8 memory_has "(.mutedThreads // []) | index(\"$(nid 0)\")"
+    sleep 0.8
+    shot thread-muted
+    ssh_session "omarchy-shell $AMPERE_ID close" >/dev/null
+    within 6 panel_closed
+
+    set_working 0 true; set_working 1 true
+    check mute "both threads read as working" within 20 working_is 2
+    sleep 40
+    set_working 0 false; set_working 1 false
+    check mute "a long turn notifies" within 30 notified "$long_t"
+    check mute "a muted thread's turn does not" not_notified "$muted_t"
+
+    set_working 2 true
+    within 20 working_is 1
+    set_working 2 false
+    within 20 working_is 0
+    sleep 6
+    check short "a turn shorter than 30 s stays quiet" not_notified "$short_t"
+
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 1
+    qmp press b
+    check bell "b snoozes for an hour" within 8 bell_is snoozed
+    sleep 0.8
+    shot bell-snoozed
+    ssh_session "omarchy-shell $AMPERE_ID close" >/dev/null
+    within 6 panel_closed
+    set_working 3 true
+    within 20 working_is 1
+    sleep 35
+    set_working 3 false
+    within 20 working_is 0
+    sleep 6
+    check bell "a long turn while snoozed stays quiet" not_notified "$snoozed_t"
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 1
+    qmp press b
+    check bell "b again turns them off" within 8 memory_has '.muteUntil == -1'
+    qmp press b
+    check bell "and b once more back on" within 8 memory_has '.muteUntil == 0'
+    ssh_session "omarchy-shell $AMPERE_ID close" >/dev/null
+    check ipc "snooze over IPC" bell_is_after "snooze 5" snoozed
+    check ipc "unmute over IPC" bell_is_after unmute on
+
     log "A background ask survives a shell restart, with the session's PATH"
     ssh_guest "jq '.execSeconds = 45' \$HOME/.fake-amp/state.json > /tmp/s.json && mv /tmp/s.json \$HOME/.fake-amp/state.json"
     ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
     within 10 panel_open; sleep 1.5
     qmp press n; sleep 0.5; qmp type "Survive a restart"; qmp press ctrl-ret
-    check background "Ctrl+Enter starts the long task" within 15 called '["-x","Survive a restart"]'
+    check background "Ctrl+Enter starts the long task" within 15 called '["<stdin-x>","Survive a restart"]'
+    check private "the background prompt is in no process's command line" not_in_argv "Survive a restart"
     local task_pid task_path shell_path
-    task_pid=$(ssh_guest "jq -r 'select(.argv == [\"-x\",\"Survive a restart\"]) | .pid' \$HOME/.fake-amp/calls.log | tail -1")
-    task_path=$(ssh_guest "jq -r 'select(.argv == [\"-x\",\"Survive a restart\"]) | .path' \$HOME/.fake-amp/calls.log | tail -1")
+    task_pid=$(ssh_guest "jq -r 'select(.argv == [\"<stdin-x>\",\"Survive a restart\"]) | .pid' \$HOME/.fake-amp/calls.log | tail -1")
+    task_path=$(ssh_guest "jq -r 'select(.argv == [\"<stdin-x>\",\"Survive a restart\"]) | .path' \$HOME/.fake-amp/calls.log | tail -1")
     # The shell's own PATH, read from whichever process answers as omarchy-shell.
     shell_path=$(ssh_guest "for p in \$(pgrep -f 'quickshell|(^|/)qs( |\$)'); do tr '\\0' '\\n' < /proc/\$p/environ 2>/dev/null | sed -n 's/^PATH=//p'; done | head -1")
     note "shell PATH: ${shell_path:-<not found>}"

@@ -105,4 +105,44 @@ test("parseJson takes the last line and refuses garbage", () => {
   assert.equal(M.parseJson(""), null)
 })
 
+test("turn starts keep what is known and drop what stopped", () => {
+  const s1 = M.turnStarts({}, [{ id: "a", working: true }, { id: "b", working: false }], 100)
+  assert.deepEqual(s1, { a: 100 })
+  const s2 = M.turnStarts(s1, [{ id: "a", working: true }, { id: "c", working: true }], 200)
+  assert.deepEqual(s2, { a: 100, c: 200 })
+  assert.deepEqual(M.turnStarts(s2, [{ id: "a", working: false }], 300), {})
+})
+
+test("quiet hours parse, cross midnight and refuse nonsense", () => {
+  assert.deepEqual(M.quietHours("22:00-08:00"), { from: 1320, to: 480 })
+  assert.deepEqual(M.quietHours(" 9:30 - 17:45 "), { from: 570, to: 1065 })
+  for (const bad of ["", "22-08", "25:00-08:00", "10:00-10:00", "10:60-11:00", null, "evening"]) assert.equal(M.quietHours(bad), null, String(bad))
+  const at = (h, m) => new Date(2026, 10, 1, h, m)
+  assert.equal(M.inQuietHours("22:00-08:00", at(23, 30)), true)
+  assert.equal(M.inQuietHours("22:00-08:00", at(7, 59)), true)
+  assert.equal(M.inQuietHours("22:00-08:00", at(8, 0)), false)
+  assert.equal(M.inQuietHours("22:00-08:00", at(12, 0)), false)
+  assert.equal(M.inQuietHours("12:00-13:00", at(12, 30)), true)
+  assert.equal(M.inQuietHours("12:00-13:00", at(13, 0)), false)
+  assert.equal(M.inQuietHours("", at(3, 0)), false)
+})
+
+test("the bell cycles on, snoozed, off", () => {
+  assert.equal(M.muteState(0, NOW), "on")
+  assert.equal(M.muteState(NOW - 1, NOW), "on")
+  assert.equal(M.muteState(NOW + 1, NOW), "snoozed")
+  assert.equal(M.muteState(-1, NOW), "off")
+  assert.equal(M.nextMute(0, NOW), NOW + 3600000)
+  assert.equal(M.nextMute(NOW + 5, NOW), -1)
+  assert.equal(M.nextMute(-1, NOW), 0)
+})
+
+test("only long, unmuted turns notify", () => {
+  const done = [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }]
+  const starts = { a: NOW - 120000, b: NOW - 5000, c: NOW - 120000 }
+  assert.deepEqual(M.notifiable(done, starts, NOW, 30, ["c"]).map(r => r.id), ["a", "d"])
+  assert.deepEqual(M.notifiable(done, starts, NOW, 0, []).map(r => r.id), ["a", "b", "c", "d"])
+  assert.deepEqual(M.notifiable([], starts, NOW, 30, []), [])
+})
+
 process.stdout.write(`\n${count} passed\n`)

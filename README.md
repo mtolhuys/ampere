@@ -22,8 +22,11 @@ one box that starts new work in a terminal, in the background or in an orb.
 - **A bar icon that knows.** The bolt lights up and pulses while a thread
   works, shows a count when more than one does, and its tooltip says how much
   of your allowance is left.
-- **Notified when a turn finishes.** A thread that was working and goes quiet
-  sends a desktop notification. Its Open action takes you to the thread.
+- **Notified when a turn finishes, on your terms.** A thread that was working
+  and goes quiet sends a desktop notification; its Open action takes you to
+  the thread. Quick turns stay quiet, and so does everything while the panel
+  is open. See [Notifications](#notifications) to snooze, mute a thread, set
+  quiet hours or turn them off.
 - **Your allowance, on pace.** Agent usage and orb hours as fuel gauges, with
   a hairline where an even spend through the period would be today, plus the
   reset date and your credits.
@@ -65,11 +68,13 @@ On a vertical bar, in Catppuccin Latte:
 | `m` | Copy it as Markdown |
 | `e` | Rename it |
 | `a` | Archive it |
+| `q` | Mute or unmute its notifications |
 | `x` `x` | Delete it (press twice) |
 | `/` | Search |
 | `n` / `i` | Ask Amp |
 | `0`–`4` | Mode: Default, Low, Medium, High, Ultra |
 | `f` | Toggle Fast |
+| `b` | Notifications: on, snoozed for an hour, off |
 | `s` | Show all recent threads |
 | `r` | Refresh |
 | `t` / `u` / `d` | `amp top`, detailed usage, dashboard |
@@ -95,7 +100,7 @@ The bolt lands in the bar's right section; drag it anywhere on the bar.
 
 ```bash
 omarchy plugin remove io.github.mtolhuys.ampere
-rm -rf ~/.local/state/io.github.mtolhuys.ampere   # the remembered directory, mode and Fast
+rm -rf ~/.local/state/io.github.mtolhuys.ampere   # the remembered directory, mode, Fast and mutes
 ```
 
 Ampere changes nothing in Amp's own settings, and nothing else to clean up.
@@ -113,6 +118,10 @@ omarchy-shell io.github.mtolhuys.ampere newThread  # Amp in a terminal
 omarchy-shell io.github.mtolhuys.ampere top        # amp top
 omarchy-shell io.github.mtolhuys.ampere refresh
 omarchy-shell io.github.mtolhuys.ampere working    # prints the working count
+omarchy-shell io.github.mtolhuys.ampere snooze 90  # no notifications for 90 minutes
+omarchy-shell io.github.mtolhuys.ampere mute       # none until unmute
+omarchy-shell io.github.mtolhuys.ampere unmute
+omarchy-shell io.github.mtolhuys.ampere notifications  # prints on, snoozed, off or settings
 ```
 
 ## Settings
@@ -120,12 +129,34 @@ omarchy-shell io.github.mtolhuys.ampere working    # prints the working count
 | Setting | Default |
 |---|---|
 | Notify when a thread finishes a turn | on |
+| Only for turns longer than | 30 s (0 notifies every turn) |
+| Quiet hours | none (like `22:00-08:00`) |
 | Show plan usage | on |
 | Threads shown | 6 |
 | Open threads in | Browser tab (or a web app window) |
 | Refresh while Amp works | 8 s |
 | Refresh while idle | 60 s |
 | Amp CLI path | found automatically |
+
+## Notifications
+
+A turn that ends notifies you when all of these hold:
+
+- **Notify when a thread finishes a turn** is on in the widget's settings
+  (off turns them off for good).
+- The turn ran longer than **Only for turns longer than** (30 s by default),
+  so a quick question and answer does not ping you.
+- It is not inside your **Quiet hours** (`22:00-08:00` crosses midnight).
+- The bell in the panel's header is on. Click it, or press `b`, to go from
+  on to snoozed for an hour to off and back; it shows which, and the
+  snooze ends by itself.
+- You have not muted that thread: `q`, or the bell-off action on its row,
+  stops one busy thread from notifying, and `q` again lets it back in. A
+  muted row shows 󰂛 next to its age.
+- The panel is closed. Open, you see the row go quiet yourself.
+
+Several turns that end together arrive as one notification. Do Not Disturb
+in Omarchy holds Ampere's notifications like any other.
 
 ## How it works, and what it touches
 
@@ -140,9 +171,17 @@ With a bar on several screens, one instance polls and shares what it read.
 
 - **Network:** none of its own. Amp's CLI talks to ampcode.com, and links
   open in your browser. URLs are checked to be `https://ampcode.com/…`.
-- **Files:** Ampere remembers your last directory, mode and Fast in
-  `~/.local/state/io.github.mtolhuys.ampere/memory.json` (0600, through
-  omakit's Store block). Copying writes to the clipboard with `wl-copy`.
+- **Files:** Ampere remembers your last directory, mode, Fast and
+  notification mutes in `~/.local/state/io.github.mtolhuys.ampere/memory.json`
+  (0600, through omakit's Store block). Copying writes to the clipboard with
+  `wl-copy`.
+- **Your prompts stay private.** What you type into Ask Amp is never put on a
+  command line, where other accounts on the machine could read it in
+  `/proc`. The panel hands it to the helper in the environment, which only
+  your account can read. A background or orb ask pipes it into `amp -x` on
+  stdin. A terminal ask leaves it in a 0600 file under
+  `$XDG_RUNTIME_DIR/io.github.mtolhuys.ampere/`, which the terminal reads and
+  deletes before it starts Amp.
 - **Processes:** terminals open through `uwsm-app` and `xdg-terminal-exec`
   with app id `org.omarchy.agent`, like `omarchy agent`. Background asks run
   in a session of their own with your session's `PATH`, so a shell restart

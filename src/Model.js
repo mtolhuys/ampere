@@ -147,6 +147,60 @@ function finished(before, after) {
   return out
 }
 
+// When each working thread started its turn, as first seen by a poll: the
+// start already known is kept, a thread new to work starts `now`, and a
+// thread that stopped is dropped.
+function turnStarts(starts, rows, now) {
+  var out = {}
+  for (var i = 0; i < (rows || []).length; i++) {
+    var row = rows[i]
+    if (row && row.working) out[row.id] = starts && starts[row.id] ? starts[row.id] : now
+  }
+  return out
+}
+
+// "22:00-08:00" as minutes since midnight, or null when it is not a range.
+// The range may cross midnight; equal ends are no range at all.
+function quietHours(spec) {
+  var m = /^\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*$/.exec(String(spec || ""))
+  if (!m) return null
+  var from = Number(m[1]) * 60 + Number(m[2])
+  var to = Number(m[3]) * 60 + Number(m[4])
+  if (Number(m[1]) > 23 || Number(m[3]) > 23 || Number(m[2]) > 59 || Number(m[4]) > 59 || from === to) return null
+  return { from: from, to: to }
+}
+
+function inQuietHours(spec, date) {
+  var range = quietHours(spec)
+  if (!range) return false
+  var t = date.getHours() * 60 + date.getMinutes()
+  return range.from < range.to ? t >= range.from && t < range.to : t >= range.from || t < range.to
+}
+
+// muteUntil: 0 notifies, -1 is muted until turned back on, a time in ms is a
+// snooze that ends by itself.
+function muteState(muteUntil, now) {
+  if (muteUntil === -1) return "off"
+  return muteUntil > now ? "snoozed" : "on"
+}
+
+// The bell's cycle: on, snoozed for an hour, off, on.
+function nextMute(muteUntil, now) {
+  var s = muteState(muteUntil, now)
+  return s === "on" ? now + 3600000 : (s === "snoozed" ? -1 : 0)
+}
+
+// Of the threads that just finished, the ones worth a notification: not
+// muted, and working for at least `minSeconds`. A turn whose start was not
+// seen counts as long, so a restart never drops a notification.
+function notifiable(done, starts, now, minSeconds, muted) {
+  return (done || []).filter(function(row) {
+    if ((muted || []).indexOf(row.id) >= 0) return false
+    var start = starts ? starts[row.id] : 0
+    return !start || now - start >= (minSeconds || 0) * 1000
+  })
+}
+
 // Directories the ask box offers: the remembered one first, then where recent
 // threads ran, then the runner's, then home. Unique, at most `limit`.
 function askDirs(remembered, threadDirs, runnerDirs, home, limit) {
@@ -198,6 +252,7 @@ if (typeof module !== "undefined") {
     hours: hours, periodElapsed: periodElapsed, pace: pace, paceWord: paceWord, monthDay: monthDay,
     tierShort: tierShort, baseName: baseName, prettyDir: prettyDir, state: state, subtitle: subtitle,
     working: working, finished: finished, askDirs: askDirs, wave: wave, clamp: clamp,
-    voice: voice, subtitleRest: subtitleRest
+    voice: voice, subtitleRest: subtitleRest, turnStarts: turnStarts, quietHours: quietHours,
+    inQuietHours: inQuietHours, muteState: muteState, nextMute: nextMute, notifiable: notifiable
   }
 }

@@ -7,7 +7,7 @@
 // forwarded port with the lab's key, every key press to the guest's
 // virtual keyboard.
 //
-//   node prove.mjs <plugin-tree> <label> <all|visual|actions|probe> [--memory MiB] [--keep-seconds n]
+//   node prove.mjs <plugin-tree> <label> <all|visual|actions|probe|art> [--memory MiB] [--keep-seconds n]
 //
 // It boots only while the host keeps 2 GiB available beyond the guest, and
 // ends a guest whose SSH is still silent 60 s after QEMU started.
@@ -42,8 +42,8 @@ const memoryOverride = args.includes("--memory") ? Number(args[args.indexOf("--m
 const HOST_MARGIN_MIB = 2048
 // SSH silent this long after QEMU started: the guest is ended, not waited for.
 const SSH_SILENT_SECONDS = 60
-if (!tree || !label || !["all", "visual", "actions", "probe"].includes(what)) {
-  process.stderr.write("usage: prove.mjs <plugin-tree> <label> <all|visual|actions|probe> [--memory MiB] [--keep-seconds n]\n")
+if (!tree || !label || !["all", "visual", "actions", "probe", "art"].includes(what)) {
+  process.stderr.write("usage: prove.mjs <plugin-tree> <label> <all|visual|actions|probe|art> [--memory MiB] [--keep-seconds n]\n")
   process.exit(2)
 }
 if (!existsSync(join(tree, "manifest.json"))) {

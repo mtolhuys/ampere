@@ -1,3 +1,5 @@
+![Ampere: Amp, live in your Omarchy bar](docs/media/banner.png)
+
 # Ampere
 
 **Amp in your Omarchy bar.** A bolt that glows while [Amp](https://ampcode.com)
@@ -5,7 +7,7 @@ works, and a keyboard-first panel with the live current of your threads, your
 plan's allowance on pace, every recent thread with its actions, search, and
 one box that starts new work in a terminal, in the background or in an orb.
 
-![Ampere's panel](docs/media/preview.png)
+![Ampere's panel in a dark and a light theme](docs/media/panels.png)
 
 ## What it does
 
@@ -41,6 +43,16 @@ one box that starts new work in a terminal, in the background or in an orb.
     project.
 - **Toolbox.** Dashboard, detailed usage, `amp top`, settings, MCP doctor,
   skills, model providers, and Update CLI, each one click away.
+
+## Gallery
+
+| Search | Ask Amp | A finished turn |
+|---|---|---|
+| ![Search](docs/media/search.png) | ![Ask Amp](docs/media/ask.png) | ![Notification](docs/media/notification.png) |
+
+On a vertical bar, in Catppuccin Latte:
+
+<img src="docs/media/vertical.png" alt="Ampere on a vertical bar" width="360">
 
 ## Keys
 

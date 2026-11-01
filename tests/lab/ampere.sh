@@ -103,6 +103,29 @@ PY
   sleep 2
   shot bar-working
 
+  # ------------------------------------------------------------ art
+  # Clean captures for the README and the marketplace preview: three
+  # threads working, the panel in the default theme and a light one.
+  if [[ $what == art ]]; then
+    ssh_guest "jq '.threads[2].working = true | .threads[2].connected = true' \$HOME/.fake-amp/state.json > /tmp/s.json && mv /tmp/s.json \$HOME/.fake-amp/state.json"
+    ssh_session "omarchy-shell $AMPERE_ID refresh" >/dev/null
+    check art "three threads read as working" within 30 working_is 3
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    within 10 panel_open; sleep 4
+    shot art-dark
+    qmp press j; sleep 0.3; qmp press j; sleep 0.8
+    shot art-dark-cursor
+    qmp press esc; sleep 1
+    sleep 2
+    shot art-bar
+    ssh_session "omarchy-theme-set 'Catppuccin Latte'" > "$RUN_DIR/theme.log" 2>&1 || true
+    sleep 6
+    ssh_session "omarchy-shell $AMPERE_ID open" >/dev/null
+    sleep 4
+    shot art-light
+    ssh_session "omarchy-shell $AMPERE_ID close" >/dev/null
+  fi
+
   # ------------------------------------------------------------ visual
   if [[ $what == all || $what == visual ]]; then
     log "The panel, open"

@@ -1,0 +1,152 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root {
+    --bg: #0d0e18; --fg: #c0caf5; --dim: #7c84a8; --accent: #7aa2f7;
+    --cyan: #4fb4c4; --magenta: #b79af0; --green: #9ece6a; --yellow: #e0af68;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 1600px; height: 560px; overflow: hidden; background: var(--bg); }
+  body {
+    font-family: "JetBrainsMono Nerd Font", "JetBrains Mono", monospace;
+    color: var(--fg); position: relative;
+  }
+  .glow { position: absolute; border-radius: 50%; filter: blur(90px); opacity: .55; }
+  .g1 { width: 760px; height: 760px; left: -220px; top: -300px; background: radial-gradient(circle, #5b3fa8 0%, transparent 70%); }
+  .g2 { width: 900px; height: 900px; right: -260px; bottom: -420px; background: radial-gradient(circle, #1f6f86 0%, transparent 70%); }
+  .g3 { width: 600px; height: 600px; left: 520px; top: 380px; background: radial-gradient(circle, #2b3f8f 0%, transparent 70%); opacity: .45; }
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(122,162,247,.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(122,162,247,.055) 1px, transparent 1px);
+    background-size: 64px 64px;
+    mask-image: radial-gradient(ellipse 80% 70% at 35% 50%, #000 30%, transparent 85%);
+  }
+  svg.waves { position: absolute; left: 0; top: 0; }
+
+  .copy { position: absolute; left: 104px; top: 128px; width: 760px; }
+  .mark { display: flex; align-items: center; gap: 30px; }
+  .tile {
+    width: 112px; height: 112px; border-radius: 30px;
+    background: linear-gradient(145deg, rgba(122,162,247,.42), rgba(183,154,240,.16));
+    border: 2px solid rgba(122,162,247,.6);
+    box-shadow: 0 0 60px rgba(122,162,247,.35), inset 0 1px 0 rgba(255,255,255,.12);
+    display: grid; place-items: center;
+  }
+  .tile span { font-size: 68px; color: #e8ecff; text-shadow: 0 0 24px rgba(122,162,247,.9); line-height: 1; }
+  h1 {
+    font-size: 132px; font-weight: 800; letter-spacing: -4px; line-height: 1;
+    background: linear-gradient(100deg, #e9edff 0%, #a8c2ff 45%, #c9b2ff 100%);
+    -webkit-background-clip: text; color: transparent;
+    filter: drop-shadow(0 6px 30px rgba(122,162,247,.25));
+  }
+  .tag { margin-top: 34px; font-size: 38px; font-weight: 600; color: #e3e8ff; letter-spacing: -.5px; }
+  .tag b { color: var(--accent); font-weight: 700; }
+  .sub { margin-top: 12px; font-size: 22px; color: var(--dim); }
+
+  ul { list-style: none; margin-top: 48px; display: grid; gap: 20px; }
+  li { display: flex; align-items: center; gap: 18px; font-size: 26px; color: #cfd6f6; }
+  li i {
+    font-style: normal; width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+    font-size: 22px; flex: none;
+  }
+  .c { background: rgba(79,180,196,.16); color: var(--cyan); box-shadow: inset 0 0 0 1.5px rgba(79,180,196,.45); }
+  .m { background: rgba(183,154,240,.16); color: var(--magenta); box-shadow: inset 0 0 0 1.5px rgba(183,154,240,.45); }
+  .gr { background: rgba(158,206,106,.15); color: var(--green); box-shadow: inset 0 0 0 1.5px rgba(158,206,106,.45); }
+  .y { background: rgba(224,175,104,.15); color: var(--yellow); box-shadow: inset 0 0 0 1.5px rgba(224,175,104,.45); }
+
+  .install {
+    position: absolute; left: 104px; bottom: 84px;
+    font-size: 20px; color: #aab3d9; padding: 16px 24px; border-radius: 14px;
+    background: rgba(13,14,24,.75); border: 1.5px solid rgba(122,162,247,.28);
+    box-shadow: 0 10px 40px rgba(0,0,0,.35);
+  }
+  .install .p { color: var(--green); margin-right: 12px; }
+  .install .u { color: var(--accent); }
+
+  .stage { position: absolute; right: 64px; top: 0; width: 676px; height: 1000px; }
+  .panel {
+    position: absolute; border-radius: 18px; overflow: hidden;
+    box-shadow: 0 40px 90px rgba(0,0,0,.6), 0 0 0 2px rgba(122,162,247,.75), 0 0 80px rgba(122,162,247,.22);
+  }
+  .panel img { display: block; }
+  .light {
+    left: 0; top: 168px; transform: rotate(-7deg) scale(.84); transform-origin: top left; opacity: .96;
+    box-shadow: 0 40px 90px rgba(0,0,0,.55), 0 0 0 2px rgba(30,102,245,.8);
+  }
+  .dark { right: 0; top: 118px; }
+  .chip {
+    position: absolute; font-size: 16px; padding: 8px 14px; border-radius: 999px; letter-spacing: 1.5px; font-weight: 700;
+    background: rgba(13,14,24,.85); border: 1.5px solid rgba(122,162,247,.4); color: #c8d3ff;
+  }
+
+  .copy { top: 104px; }
+  h1 { font-size: 120px; }
+  .tile { width: 100px; height: 100px; border-radius: 27px; }
+  .tile span { font-size: 60px; }
+  .tag { margin-top: 30px; }
+  .stage { right: 96px; top: 46px; width: 470px; height: 470px; }
+  .dark { right: 0; top: 0; }
+  .fadeout { position: absolute; left: 0; right: 0; bottom: 0; height: 120px; background: linear-gradient(transparent, var(--bg)); }
+  .g2 { bottom: -560px; }
+</style>
+</head>
+<body>
+  <div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div>
+  <div class="grid"></div>
+  <svg class="waves" width="1600" height="560" viewBox="0 0 1600 560">
+    <defs>
+      <filter id="bloom" x="-10%" y="-50%" width="120%" height="200%"><feGaussianBlur stdDeviation="7"/></filter>
+      <linearGradient id="fade" x1="0" x2="1">
+        <stop offset="0" stop-color="#fff" stop-opacity="0"/>
+        <stop offset=".1" stop-color="#fff" stop-opacity="1"/>
+        <stop offset=".9" stop-color="#fff" stop-opacity="1"/>
+        <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+      </linearGradient>
+      <mask id="m"><rect width="1600" height="560" fill="url(#fade)"/></mask>
+    </defs>
+    <g mask="url(#m)" fill="none" stroke-linecap="round" id="waves"></g>
+  </svg>
+  <div class="copy">
+    <div class="mark">
+      <div class="tile"><span>󱐋</span></div>
+      <h1>Ampere</h1>
+    </div>
+    <div class="tag">Amp, live in your <b>Omarchy</b> bar.</div>
+    <div class="sub">One wave per working thread. In your theme's own colors.</div>
+  </div>
+  <div class="stage">
+    <div class="panel dark"><img src="panel-top.png" width="436" height="466"></div>
+    
+  </div>
+<script>
+  // The same voices the plugin draws, so the art and the scope agree.
+  function voice(x, t, k) {
+    const taper = Math.pow(Math.sin(Math.PI * Math.min(1, Math.max(0, x))), 0.7)
+    const f = 5 + k * 3.7
+    let y = Math.sin(x * f * Math.PI + t * (1.9 + k * 0.75) + k * 2.1)
+    y += Math.sin(x * (f * 2.3) * Math.PI - t * (3.1 + k * 0.4)) * 0.22
+    return (y / 1.22) * taper * (0.92 - k * 0.1)
+  }
+  const g = document.getElementById("waves")
+  const colors = ["#4fb4c4", "#b79af0", "#9ece6a"]
+  const mid = 470, amp = 54, x0 = -40, x1 = 1640
+  for (let k = colors.length - 1; k >= 0; k--) {
+    let d = ""
+    for (let i = 0; i <= 400; i++) {
+      const x = i / 400
+      d += (i ? "L" : "M") + (x0 + x * (x1 - x0)).toFixed(1) + " " + (mid - voice(x * 0.62, 2.4, k) * amp).toFixed(1)
+    }
+    for (const [w, o, blur] of [[14, .35, true], [3.2, .95, false]]) {
+      const p = document.createElementNS("http://www.w3.org/2000/svg", "path")
+      p.setAttribute("d", d); p.setAttribute("stroke", colors[k]); p.setAttribute("stroke-width", w)
+      p.setAttribute("stroke-opacity", o); if (blur) p.setAttribute("filter", "url(#bloom)")
+      g.appendChild(p)
+    }
+  }
+</script>
+</body>
+</html>
